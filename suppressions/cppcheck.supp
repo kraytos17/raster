@@ -1,0 +1,5 @@
+// cppcheck suppressions for raster.
+// Add narrow, documented entries only after confirming a false positive in raster code.
+// Suppress unmatched-suppression warnings if an entry stops matching.
+unmatchedSuppression
+*:*/_deps/*

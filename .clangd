@@ -1,0 +1,17 @@
+CompileFlags:
+  Add: [-std=c++23, -Wall, -Wextra, -Wpedantic]
+  CompilationDatabase: build/debug-sanitized
+  Remove: [-march=native, -mavx*, -mfma*]
+
+Diagnostics:
+  UnusedIncludes: Strict
+
+Index:
+  Background: Build
+
+InlayHints:
+  BlockEnd: false
+  DeducedTypes: true
+  Designators: true
+  Enabled: true
+  ParameterNames: true

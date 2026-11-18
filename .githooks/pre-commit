@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Fast C++ checks for staged files. Full lint and tests remain explicit CMake targets.
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+if ! git diff --cached --check; then
+    echo "pre-commit: fix staged whitespace errors" >&2
+    exit 1
+fi
+
+mapfile -d '' staged_cpp < <(
+    git diff --cached --name-only -z --diff-filter=ACMR -- \
+        '*.c' '*.cc' '*.cpp' '*.cxx' '*.h' '*.hh' '*.hpp' '*.hxx'
+)
+
+if ((${#staged_cpp[@]} == 0)); then
+    exit 0
+fi
+
+clang_format="${CLANG_FORMAT:-clang-format}"
+if ! command -v "$clang_format" >/dev/null 2>&1; then
+    echo "pre-commit: $clang_format not found; install clang-format to check staged C++" >&2
+    exit 1
+fi
+
+for file in "${staged_cpp[@]}"; do
+    if ! git show ":$file" | "$clang_format" --dry-run --Werror --style=file \
+        --assume-filename="$repo_root/$file" >/dev/null; then
+        echo "pre-commit: formatting check failed for $file (run clang-format -i $file)" >&2
+        exit 1
+    fi
+done
+
+echo "pre-commit: staged C++ formatting OK"

@@ -1,0 +1,142 @@
+---
+Checks:
+  - '*'
+
+  # --- Disabled domain/vendor check groups ---
+  - '-abseil-*'
+  - '-altera-*'
+  - '-android-*'
+  - '-boost-*'
+  - '-darwin-*'
+  - '-fuchsia-*'
+  - '-google-*'
+  - '-llvm-*'
+  - '-llvmlibc-*'
+  - '-mpi-*'
+  - '-objc-*'
+  - '-zircon-*'
+
+  # --- cppcoreguidelines (Curated for C++23 DOD & Rule of Zero) ---
+  - '-cppcoreguidelines-*'
+  - 'cppcoreguidelines-avoid-capturing-lambda-coroutines'
+  - 'cppcoreguidelines-init-variables'
+  - 'cppcoreguidelines-missing-std-forward'
+  - 'cppcoreguidelines-pro-type-member-init'
+  - 'cppcoreguidelines-pro-type-reinterpret-cast'
+  - 'cppcoreguidelines-rvalue-reference-param-not-moved'
+  - 'cppcoreguidelines-slicing'
+  - 'cppcoreguidelines-special-member-functions'
+
+  # --- bugprone (Kept widening, exception-escape, branch-clone, optional/expected checks ACTIVE) ---
+  - '-bugprone-assignment-in-if-condition'
+  - '-bugprone-crtp-constructor-accessibility'
+  - '-bugprone-easily-swappable-parameters'       # Vec3(float x, float y, float z) triggers this constantly
+  - '-bugprone-forward-declaration-namespace'
+  - '-bugprone-multi-level-implicit-pointer-conversion'
+  - '-bugprone-narrowing-conversions'             # Very noisy in int32 <-> float raster math
+  - '-bugprone-nondeterministic-pointer-iteration-order'
+  - '-bugprone-not-null-terminated-result'
+  - '-bugprone-reserved-identifier'
+  - '-bugprone-sizeof-expression'
+  - '-bugprone-throwing-static-initialization'    # Catch2 test registration uses static registrars
+
+  # --- cert ---
+  - '-cert-arr39-c'                               # Alias of bugprone-sizeof-expression
+  - '-cert-dcl03-c'                               # Twin of misc-static-assert
+  - '-cert-dcl16-c'
+  - '-cert-err58-cpp'                             # Twin of bugprone-throwing-static-initialization
+
+  # --- misc ---
+  - '-misc-const-correctness'                     # False-positive prone on template/mdspan views
+  - '-misc-include-cleaner'                       # Too noisy with umbrella/ transitive STL headers
+  - '-misc-no-recursion'
+  - '-misc-non-private-member-variables-in-classes'
+  - '-misc-static-assert'
+  - '-misc-use-anonymous-namespace'
+  - '-misc-use-internal-linkage'
+
+  # --- modernize (Kept ranges, designated-initializers, default-member-init, sign-comparison ACTIVE) ---
+  - '-modernize-avoid-c-arrays'
+  - '-modernize-pass-by-value'
+  - '-modernize-return-braced-init-list'
+  - '-modernize-use-auto'                         # Explicit types aid clarity in fixed-point math
+  - '-modernize-use-emplace'
+  - '-modernize-use-nodiscard'                    # Too noisy on every single helper
+  - '-modernize-use-scoped-lock'
+  - '-modernize-use-trailing-return-type'
+
+  # --- performance (Kept unnecessary-value-param & inefficient-vector-operation ACTIVE) ---
+  - '-performance-avoid-endl'
+  - '-performance-enum-size'
+  - '-performance-inefficient-string-concatenation'
+  - '-performance-no-int-to-ptr'
+
+  # --- portability ---
+  - '-portability-avoid-pragma-once'
+  - '-portability-simd-intrinsics'                # We explicitly use x86 BMI2 / AVX2 intrinsics
+  - '-portability-template-virtual-member-function'
+
+  # --- readability ---
+  - '-readability-avoid-nested-conditional-operator'
+  - '-readability-avoid-unconditional-preprocessor-if'
+  - '-readability-braces-around-statements'
+  - '-readability-convert-member-functions-to-static' # Conflicts with stateless Shader concepts
+  - '-readability-else-after-return'
+  - '-readability-function-cognitive-complexity'
+  - '-readability-function-size'
+  - '-readability-identifier-length'              # Allows x, y, z, w, u, v, n, l in 3D math
+  - '-readability-implicit-bool-conversion'
+  - '-readability-magic-numbers'
+  - '-readability-math-missing-parentheses'
+  - '-readability-named-parameter'
+  - '-readability-redundant-declaration'
+  - '-readability-redundant-inline-specifier'
+  - '-readability-redundant-member-init'
+  - '-readability-simplify-boolean-expr'
+  - '-readability-suspicious-call-argument'
+  - '-readability-uppercase-literal-suffix'       # Allows C++23 `0uz` and `1.0f` lowercase suffixes
+  - '-readability-use-anyofallof'
+  - '-readability-use-concise-preprocessor-directives'
+
+WarningsAsErrors:
+  - 'bugprone-*'
+  - 'cert-*'
+  - 'clang-analyzer-*'
+  - 'concurrency-*'
+  - 'cppcoreguidelines-*'
+  - 'misc-*'
+  - 'modernize-*'
+  - 'performance-*'
+  - 'portability-*'
+
+HeaderFilterRegex: '(^|/)(src|include)/(aether|raster)/.*'
+ExcludeHeaderFilterRegex: '(^|/)(build|_deps|third[-_]?party|external|\.cache)/'
+FormatStyle: file
+
+CheckOptions:
+  - key: readability-identifier-naming.ClassCase
+    value: CamelCase
+  - key: readability-identifier-naming.StructCase
+    value: CamelCase
+  - key: readability-identifier-naming.ClassIgnoredRegexp
+    value: '^(mapping|rebind|layout_morton)$'
+  - key: readability-identifier-naming.StructIgnoredRegexp
+    value: '^(mapping|rebind|layout_morton)$'
+  - key: readability-identifier-naming.FunctionCase
+    value: lower_case
+  - key: readability-identifier-naming.VariableCase
+    value: lower_case
+  - key: readability-identifier-naming.PrivateMemberSuffix
+    value: '_'
+  - key: readability-identifier-naming.EnumCase
+    value: CamelCase
+  - key: readability-identifier-naming.EnumConstantCase
+    value: CamelCase
+  - key: readability-identifier-naming.ConstexprVariableCase
+    value: lower_case
+  - key: modernize-loop-convert.UseCxx20ReverseRanges
+    value: 'true'
+  - key: performance-move-const-arg.CheckTriviallyCopyableMove
+    value: 'true'
+  - key: bugprone-suspicious-include.HeaderFileExtensions
+    value: 'h,hh,hpp,hxx'

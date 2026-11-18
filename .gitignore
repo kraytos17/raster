@@ -1,0 +1,24 @@
+# CMake build trees and generated files
+build/
+build-*/
+CMakeUserPresets.json
+.env
+__pycache__/
+*.py[cod]
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+Testing/
+
+# Compiler output and profiling data
+*.o
+*.a
+*.so
+*.dwo
+*.profraw
+
+.cache/
+
+# Local planning documents
+plan/

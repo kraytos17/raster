@@ -1,0 +1,139 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": { "CMAKE_COLOR_DIAGNOSTICS": "ON" }
+    },
+    {
+      "name": "gcc-base",
+      "hidden": true,
+      "inherits": "base",
+      "toolchainFile": "${sourceDir}/toolchains/gcc16.cmake"
+    },
+    {
+      "name": "clang-base",
+      "hidden": true,
+      "inherits": "base",
+      "toolchainFile": "${sourceDir}/toolchains/clang23.cmake"
+    },
+    {
+      "name": "debug-sanitized",
+      "inherits": "gcc-base",
+      "displayName": "Debug + ASan/UBSan (GCC)",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "RASTER_ENABLE_ASAN": "ON",
+        "RASTER_ENABLE_UBSAN": "ON"
+      }
+    },
+    {
+      "name": "release-native",
+      "inherits": "gcc-base",
+      "displayName": "Release + Native + LTO (GCC)",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "RASTER_ENABLE_LTO": "ON",
+        "RASTER_ENABLE_NATIVE": "ON"
+      }
+    },
+    {
+      "name": "profile-telemetry",
+      "inherits": "clang-base",
+      "displayName": "Profile + Telemetry (Clang)",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "RASTER_ENABLE_LTO": "ON",
+        "RASTER_ENABLE_NATIVE": "ON",
+        "RASTER_KEEP_FRAME_POINTER": "ON"
+      }
+    },
+    {
+      "name": "tidy",
+      "inherits": "clang-base",
+      "displayName": "Clang-Tidy (Clang)",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "RASTER_ENABLE_CLANG_TIDY": "ON"
+      }
+    },
+    {
+      "name": "analyze",
+      "inherits": "gcc-base",
+      "displayName": "GCC Analyzer",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "RASTER_ENABLE_GCC_ANALYZER": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "debug-sanitized", "configurePreset": "debug-sanitized", "jobs": 0 },
+    { "name": "release-native", "configurePreset": "release-native", "jobs": 0 },
+    { "name": "profile-telemetry", "configurePreset": "profile-telemetry", "jobs": 0 },
+    { "name": "tidy", "configurePreset": "tidy", "jobs": 0 },
+    { "name": "analyze", "configurePreset": "analyze", "jobs": 0 }
+  ],
+  "testPresets": [
+    {
+      "name": "test-base",
+      "hidden": true,
+      "output": { "outputOnFailure": true }
+    },
+    { "name": "debug-sanitized", "configurePreset": "debug-sanitized", "inherits": "test-base" },
+    { "name": "release-native", "configurePreset": "release-native", "inherits": "test-base" },
+    { "name": "profile-telemetry", "configurePreset": "profile-telemetry", "inherits": "test-base" },
+    { "name": "tidy", "configurePreset": "tidy", "inherits": "test-base" },
+    { "name": "analyze", "configurePreset": "analyze", "inherits": "test-base" }
+  ],
+  "workflowPresets": [
+    {
+      "name": "debug-sanitized",
+      "displayName": "Debug + ASan/UBSan workflow",
+      "steps": [
+        { "type": "configure", "name": "debug-sanitized" },
+        { "type": "build", "name": "debug-sanitized" },
+        { "type": "test", "name": "debug-sanitized" }
+      ]
+    },
+    {
+      "name": "release-native",
+      "displayName": "Release Native workflow",
+      "steps": [
+        { "type": "configure", "name": "release-native" },
+        { "type": "build", "name": "release-native" },
+        { "type": "test", "name": "release-native" }
+      ]
+    },
+    {
+      "name": "profile-telemetry",
+      "displayName": "Profile Telemetry workflow",
+      "steps": [
+        { "type": "configure", "name": "profile-telemetry" },
+        { "type": "build", "name": "profile-telemetry" },
+        { "type": "test", "name": "profile-telemetry" }
+      ]
+    },
+    {
+      "name": "tidy",
+      "displayName": "Clang-Tidy workflow",
+      "steps": [
+        { "type": "configure", "name": "tidy" },
+        { "type": "build", "name": "tidy" },
+        { "type": "test", "name": "tidy" }
+      ]
+    },
+    {
+      "name": "analyze",
+      "displayName": "GCC Analyzer workflow",
+      "steps": [
+        { "type": "configure", "name": "analyze" },
+        { "type": "build", "name": "analyze" },
+        { "type": "test", "name": "analyze" }
+      ]
+    }
+  ]
+}
