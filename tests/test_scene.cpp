@@ -5,16 +5,21 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <limits>
 #include <mdspan>
 #include <numbers>
+#include <optional>
 #include <ranges>
 #include <span>
 #include <tuple>
 #include <vector>
 
 #include "raster/io/obj_loader.hpp"
+#include "raster/io/tga_loader.hpp"
 #include "raster/math/mat.hpp"
 #include "raster/math/vec.hpp"
+#include "raster/memory/texture.hpp"
+#include "raster/memory/texture_layout.hpp"
 #include "raster/pipeline/clipper.hpp"
 #include "raster/pipeline/rasterizer.hpp"
 #include "raster/pipeline/shader.hpp"
@@ -254,6 +259,7 @@ namespace {
         std::size_t guard_band_output_triangles = 0;
         std::size_t guard_band_saved_triangles = 0;
         std::size_t rasterized_fragments = 0;
+        std::vector<std::uint8_t> equator_coverage(width, 0U);
         for (const auto triangle_index : std::views::iota(std::size_t{0}, mesh->triangle_count())) {
             const auto index_base = triangle_index * 3U;
             const auto index_a = static_cast<std::size_t>(mesh->indices[index_base]);
@@ -350,6 +356,9 @@ namespace {
                         std::fabs(barycentrics.l0 + barycentrics.l1 + barycentrics.l2 - 1.0F)
                         < 1e-5F
                     );
+                    if (y == height / 2U) {
+                        equator_coverage[x] = 1U;
+                    }
                     ++rasterized_fragments;
                 }
                 );
@@ -363,6 +372,110 @@ namespace {
         REQUIRE(guard_band_output_triangles > 0U);
         REQUIRE(guard_band_saved_triangles > 0U);
         REQUIRE(rasterized_fragments > 0U);
+
+        const auto first_covered = std::ranges::find(equator_coverage, std::uint8_t{1});
+        REQUIRE(first_covered != equator_coverage.end());
+        const auto last_covered = std::ranges::find_last(equator_coverage, std::uint8_t{1});
+        REQUIRE(last_covered.begin() != last_covered.end());
+        for (auto pixel = first_covered; pixel != last_covered.begin(); ++pixel) {
+            REQUIRE(*pixel == 1U);
+        }
+    }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE(
+        "partially covered quad keeps finite helper-lane UV derivatives", "[scene][m5][mipmap]"
+    ) {
+        constexpr std::size_t width = 8;
+        constexpr std::size_t height = 8;
+        const auto triangle = raster::make_screen_triangle(
+            raster::ScreenPoint{.x = 3.0F, .y = 1.0F},
+            raster::ScreenPoint{.x = 7.0F, .y = 1.0F},
+            raster::ScreenPoint{.x = 3.0F, .y = 7.0F},
+            std::array<float, 3>{1.0F, 1.0F, 1.0F},
+            std::array<float, 3>{0.5F, 0.5F, 0.5F}
+        );
+        REQUIRE(triangle.has_value());
+
+        raster::TgaImage checker_image{};
+        checker_image.width = 64U;
+        checker_image.height = 64U;
+        checker_image.pixels.resize(checker_image.width * checker_image.height);
+        for (const auto y : std::views::iota(std::size_t{0}, checker_image.height)) {
+            for (const auto x : std::views::iota(std::size_t{0}, checker_image.width)) {
+                checker_image.pixels[y * checker_image.width + x] =
+                    ((x + y) & 1U) == 0U ? 0xFFFFFFFFU : 0xFF000000U;
+            }
+        }
+        const raster::Texture2D<raster::LayoutTiled4x4> checker{checker_image};
+        std::vector<float> depth_storage(width * height, 0.0F);
+        depth_storage[3U * width + 4U] = 1.0F; // occlude one covered lane at the silhouette
+        auto depth_view =
+            std::mdspan<float, raster::Extents2D>{depth_storage.data(), height, width};
+
+        bool saw_partial_quad = false;
+        bool saw_partially_occluded_quad = false;
+        float minimum_partial_lod = std::numeric_limits<float>::infinity();
+        float maximum_partial_lod = 0.0F;
+        std::size_t tested_visible_lanes = 0;
+        raster::rasterize_triangle_quads(
+            *triangle,
+            width,
+            height,
+            std::optional{depth_view},
+            [&](std::size_t quad_x,
+                std::size_t quad_y,
+                const raster::QuadBarycentrics& quad) noexcept {
+            if (quad.coverage_mask == 0U || quad.coverage_mask == 0xFU) {
+                return;
+            }
+            saw_partial_quad = true;
+            if (quad_x == 4U && quad_y == 2U) {
+                saw_partially_occluded_quad =
+                    (quad.coverage_mask & 0x4U) != 0U && (quad.visible_mask & 0x4U) == 0U;
+            }
+            std::array<raster::Vec2f, 4> helper_uv{};
+            for (const auto lane : std::views::iota(std::size_t{0}, std::size_t{4})) {
+                const auto& bary = quad.lanes[lane];
+                helper_uv[lane] = raster::Vec2f{
+                    .x = bary.a1 * 8.0F,
+                    .y = bary.a2 * 8.0F,
+                };
+                REQUIRE(std::isfinite(helper_uv[lane].x));
+                REQUIRE(std::isfinite(helper_uv[lane].y));
+            }
+            const auto derivatives = raster::quad_derivatives(helper_uv);
+            const auto lod = raster::mip_lod(derivatives, checker.width(), checker.height());
+            REQUIRE(std::isfinite(derivatives.duv_dx.x));
+            REQUIRE(std::isfinite(derivatives.duv_dx.y));
+            REQUIRE(std::isfinite(derivatives.duv_dy.x));
+            REQUIRE(std::isfinite(derivatives.duv_dy.y));
+            REQUIRE(std::isfinite(lod));
+            minimum_partial_lod = std::min(minimum_partial_lod, lod);
+            maximum_partial_lod = std::max(maximum_partial_lod, lod);
+            for (const auto lane : std::views::iota(std::size_t{0}, std::size_t{4})) {
+                if ((quad.visible_mask & (1U << lane)) == 0U) {
+                    continue;
+                }
+                const auto filtered =
+                    checker.sample_trilinear(helper_uv[lane].x, helper_uv[lane].y, lod);
+                const auto expected = checker.sample_trilinear(
+                    helper_uv[lane].x,
+                    helper_uv[lane].y,
+                    raster::mip_lod(derivatives, checker.width(), checker.height())
+                );
+                REQUIRE(filtered == expected);
+                REQUIRE(filtered == 0xFF7F7F7FU);
+                ++tested_visible_lanes;
+            }
+            INFO("partial quad at " << quad_x << ',' << quad_y);
+        }
+        );
+        REQUIRE(saw_partial_quad);
+        REQUIRE(saw_partially_occluded_quad);
+        REQUIRE(tested_visible_lanes > 0U);
+        REQUIRE(maximum_partial_lod - minimum_partial_lod < 1e-5F);
+        REQUIRE(std::fabs(minimum_partial_lod - 7.0F) < 0.1F);
     }
 } // namespace
 

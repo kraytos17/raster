@@ -50,6 +50,7 @@ namespace raster::render {
             struct Varyings {
                 Vec4f clip_pos{};
                 Vec2f uv{};
+                float mip_lod{};
 
                 [[nodiscard]]
                 constexpr auto attributes(this auto&& self) noexcept {
@@ -80,7 +81,8 @@ namespace raster::render {
                                == 0
                            ? 0xFFCCCCCCU
                            : 0xFF555555U)
-                    : uniforms.texture->sample_nearest(varying.uv.x, varying.uv.y);
+                    : uniforms.texture
+                          ->sample_trilinear(varying.uv.x, varying.uv.y, varying.mip_lod);
                 return Vec4f{
                     .x = static_cast<float>((texel >> 16U) & 0xFFU) / 255.0F,
                     .y = static_cast<float>((texel >> 8U) & 0xFFU) / 255.0F,
@@ -191,21 +193,43 @@ namespace raster::render {
             }
 
             auto color = framebuffer.color_view();
-            rasterize_triangle(
+            rasterize_triangle_quads(
                 *triangle,
                 width,
                 height,
                 framebuffer.depth_view(),
-                [&](std::size_t x, std::size_t y, const PixelBarycentrics& barycentrics) noexcept {
-                const auto attributes =
-                    shader.interpolate(varying_a, varying_b, varying_c, barycentrics);
-                const auto shaded = shader.fragment(
-                    FloorShader::Varyings{
-                        .clip_pos = varying_a.clip_pos,
-                        .uv = std::get<0>(attributes),
-                    }
+                [&](std::size_t quad_x, std::size_t quad_y, const QuadBarycentrics& quad) noexcept {
+                std::array<Vec2f, 4> quad_uv{};
+                for (const auto lane : std::views::iota(std::size_t{0}, std::size_t{4})) {
+                    const auto& barycentrics = quad.lanes[lane];
+                    const auto attributes =
+                        shader.interpolate(varying_a, varying_b, varying_c, barycentrics);
+                    quad_uv[lane] = std::get<0>(attributes);
+                }
+
+                const auto derivatives = quad_derivatives(quad_uv);
+                const auto lod = mip_lod(
+                    derivatives,
+                    shader.uniforms.texture->width(),
+                    shader.uniforms.texture->height()
                 );
-                color[y, x] = to_argb(Rgb{.r = shaded.x, .g = shaded.y, .b = shaded.z});
+
+                for (const auto lane : std::views::iota(std::size_t{0}, std::size_t{4})) {
+                    if ((quad.visible_mask & (1U << lane)) == 0U) {
+                        continue;
+                    }
+
+                    const auto x = quad_x + (lane & 1U);
+                    const auto y = quad_y + (lane >> 1U);
+                    const auto shaded = shader.fragment(
+                        FloorShader::Varyings{
+                            .clip_pos = varying_a.clip_pos,
+                            .uv = quad_uv[lane],
+                            .mip_lod = lod,
+                        }
+                    );
+                    color[y, x] = to_argb(Rgb{.r = shaded.x, .g = shaded.y, .b = shaded.z});
+                }
             }
             );
         }
@@ -264,7 +288,7 @@ namespace raster::render {
         const auto seconds = static_cast<float>(static_cast<double>(elapsed_ns) * 1e-9);
         const auto stress_phase = std::fmod(seconds * 0.5F, 2.0F);
         const auto sweep = stress_phase <= 1.0F ? stress_phase : 2.0F - stress_phase;
-        const auto eye = [&]() -> Vec3f {
+        const auto eye = [&] -> Vec3f {
             if (clip_stress_test) {
                 return {.x = -3.0F + 6.0F * sweep, .y = 0.0F, .z = 0.0F};
             }

@@ -98,6 +98,24 @@ f -4/-4/-1 -3/-3/-1 -2/-2/-1
     }
 
     // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE("clipping sphere longitude seam has continuous face UVs", "[asset][obj][uv-seam]") {
+        const auto mesh = raster::load_obj(
+            std::filesystem::path{RASTER_ASSET_DIR} / "models/clipping_sphere.obj"
+        );
+        REQUIRE(mesh.has_value());
+        for (std::size_t face = 0; face < mesh->triangle_count(); ++face) {
+            float minimum_u = 1.0F;
+            float maximum_u = 0.0F;
+            for (const auto corner : std::views::iota(std::size_t{0}, std::size_t{3})) {
+                const auto index = static_cast<std::size_t>(mesh->indices[face * 3U + corner]);
+                minimum_u = std::min(minimum_u, mesh->uvs[index].x);
+                maximum_u = std::max(maximum_u, mesh->uvs[index].x);
+            }
+            REQUIRE(maximum_u - minimum_u <= 1.0F / 32.0F + 1e-6F);
+        }
+    }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
     TEST_CASE("OBJ loader reports malformed and unsupported data", "[asset][obj][errors]") {
         const auto malformed_vertex = raster::parse_obj_buffer("v 0 nope 0\n");
         REQUIRE_FALSE(malformed_vertex.has_value());

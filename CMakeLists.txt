@@ -94,6 +94,13 @@ raster_apply_sanitizers(raster)
 raster_apply_static_analysis(raster)
 raster_apply_clang_tidy(raster)
 
+add_executable(raster_texture_benchmark bench/texture_layout_benchmark.cpp)
+target_link_libraries(raster_texture_benchmark PRIVATE raster::engine)
+raster_apply_optimization(raster_texture_benchmark)
+raster_apply_sanitizers(raster_texture_benchmark)
+raster_apply_static_analysis(raster_texture_benchmark)
+raster_apply_clang_tidy(raster_texture_benchmark)
+
 if(RASTER_BUILD_TESTS)
     enable_testing()
     include(FetchContent)

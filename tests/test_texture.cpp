@@ -118,6 +118,41 @@ namespace {
         REQUIRE(derivatives.duv_dy.y == 0.5F);
         REQUIRE(raster::mip_lod(derivatives, 256, 256) == 7.0F);
     }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE(
+        "mipmapped texture samples a coarser level at minification", "[texture][mipmap][render]"
+    ) {
+        raster::TgaImage image{};
+        image.width = 64;
+        image.height = 64;
+        image.pixels.resize(image.width * image.height);
+        for (const auto y : std::views::iota(std::size_t{0}, image.height)) {
+            for (const auto x : std::views::iota(std::size_t{0}, image.width)) {
+                const auto color = ((x + y) % 2U) == 0U ? 0xFFFFFFFFU : 0xFF000000U;
+                image.pixels[y * image.width + x] = color;
+            }
+        }
+
+        const raster::Texture2D<> texture{image};
+        const std::array<raster::Vec2f, 4> minified_uv{
+            raster::Vec2f{.x = 0.0F, .y = 0.0F},
+            raster::Vec2f{.x = 0.5F, .y = 0.0F},
+            raster::Vec2f{.x = 0.0F, .y = 0.5F},
+            raster::Vec2f{.x = 0.5F, .y = 0.5F},
+        };
+        const auto derivatives = raster::quad_derivatives(minified_uv);
+        const auto lod = raster::mip_lod(derivatives, texture.width(), texture.height());
+        REQUIRE(lod == 5.0F);
+        REQUIRE(texture.sample_nearest(0.1F, 0.1F) != 0xFF7F7F7FU);
+        REQUIRE(texture.sample_nearest(0.1F, 0.1F, static_cast<std::size_t>(lod)) == 0xFF7F7F7FU);
+        REQUIRE(texture.sample_trilinear(0.1F, 0.1F, lod) == 0xFF7F7F7FU);
+        REQUIRE(texture.sample_trilinear(0.1F, 0.1F, 0.0F) != texture.sample_nearest(0.1F, 0.1F));
+        REQUIRE(
+            texture.sample_trilinear(0.1F, 0.1F, 100.0F)
+            == texture.sample_nearest(0.1F, 0.1F, texture.level_count() - 1U)
+        );
+    }
 } // namespace
 
 #if defined(__clang__)

@@ -2,10 +2,13 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <functional>
+#include <limits>
 #include <optional>
 #include <ranges>
 
@@ -40,6 +43,12 @@ namespace raster {
         float a2{};
     };
 
+    struct QuadBarycentrics {
+        std::array<PixelBarycentrics, 4> lanes{};
+        std::uint32_t coverage_mask{};
+        std::uint32_t visible_mask{};
+    };
+
     // Contract for the per-pixel fragment callback handed to
     // rasterize_triangle: invocable as an lvalue (the rasterizer always calls
     // its local copy) with the covered pixel coordinates and the unbiased
@@ -51,6 +60,12 @@ namespace raster {
     // this concept).
     template <typename Fragment> concept FragmentCallback = requires(
         Fragment& fragment, std::size_t x, std::size_t y, const PixelBarycentrics& barycentrics
+    ) {
+        { std::invoke(fragment, x, y, barycentrics) } noexcept;
+    };
+
+    template <typename Fragment> concept QuadFragmentCallback = requires(
+        Fragment& fragment, std::size_t x, std::size_t y, const QuadBarycentrics& barycentrics
     ) {
         { std::invoke(fragment, x, y, barycentrics) } noexcept;
     };
@@ -202,12 +217,23 @@ namespace raster {
         std::size_t viewport_height,
         Fragment&& fragment
     ) noexcept {
-        rasterize_triangle(
+        rasterize_triangle_quads(
             triangle,
             viewport_width,
             viewport_height,
             std::nullopt,
-            std::forward<Fragment>(fragment)
+            [fragment_callback = std::forward<Fragment>(fragment)](
+                std::size_t quad_x,
+                std::size_t quad_y,
+                const QuadBarycentrics& quad
+            ) mutable noexcept {
+            for (const auto lane : std::views::iota(std::size_t{0}, std::size_t{4})) {
+                if ((quad.visible_mask & (1U << lane)) == 0U) {
+                    continue;
+                }
+                fragment_callback(quad_x + (lane & 1U), quad_y + (lane >> 1U), quad.lanes[lane]);
+            }
+        }
         );
     }
 
@@ -218,6 +244,48 @@ namespace raster {
     // fragment shading entirely — and passing pixels write depth before
     // shading.
     template <FragmentCallback Fragment> void rasterize_triangle(
+        const ScreenTriangle& triangle,
+        std::size_t viewport_width,
+        std::size_t viewport_height,
+        std::optional<std::mdspan<float, Extents2D>> depth_view,
+        Fragment&& fragment
+    ) noexcept {
+        rasterize_triangle_quads(
+            triangle,
+            viewport_width,
+            viewport_height,
+            depth_view,
+            [fragment_callback = std::forward<Fragment>(fragment)](
+                std::size_t quad_x,
+                std::size_t quad_y,
+                const QuadBarycentrics& quad
+            ) mutable noexcept {
+            for (const auto lane : std::views::iota(std::size_t{0}, std::size_t{4})) {
+                if ((quad.visible_mask & (1U << lane)) == 0U) {
+                    continue;
+                }
+                fragment_callback(quad_x + (lane & 1U), quad_y + (lane >> 1U), quad.lanes[lane]);
+            }
+        }
+        );
+    }
+
+    template <QuadFragmentCallback Fragment> void rasterize_triangle_quads(
+        const ScreenTriangle& triangle,
+        std::size_t viewport_width,
+        std::size_t viewport_height,
+        Fragment&& fragment
+    ) noexcept {
+        rasterize_triangle_quads(
+            triangle,
+            viewport_width,
+            viewport_height,
+            std::nullopt,
+            std::forward<Fragment>(fragment)
+        );
+    }
+
+    template <QuadFragmentCallback Fragment> void rasterize_triangle_quads(
         const ScreenTriangle& triangle,
         std::size_t viewport_width,
         std::size_t viewport_height,
@@ -298,10 +366,6 @@ namespace raster {
                 std::array<std::array<float, 3>, 4> corner_weights{};
                 std::uint32_t visible_mask = coverage_mask;
                 for (const auto corner : std::views::iota(std::size_t{0}, std::size_t{4})) {
-                    if ((coverage_mask & (1U << corner)) == 0) {
-                        continue;
-                    }
-
                     const auto l0 = static_cast<float>(corner_edges[corner][1]) * triangle.inv_area;
                     const auto l1 = static_cast<float>(corner_edges[corner][2]) * triangle.inv_area;
                     const auto l0_plus_l1 = l0 + l1;
@@ -344,15 +408,13 @@ namespace raster {
                         continue;
                     }
                 }
-                for (const auto corner : std::views::iota(std::size_t{0}, std::size_t{4})) {
-                    if ((visible_mask & (1U << corner)) == 0) {
-                        continue;
-                    }
 
-                    const auto corner_x =
-                        static_cast<std::size_t>(quad_x) + static_cast<std::size_t>(corner & 1U);
-                    const auto corner_y =
-                        static_cast<std::size_t>(quad_y) + static_cast<std::size_t>(corner >> 1U);
+                QuadBarycentrics quad_barycentrics{};
+                quad_barycentrics.coverage_mask = coverage_mask;
+                quad_barycentrics.visible_mask = visible_mask;
+                const auto fallback_lane = static_cast<std::size_t>(std::countr_zero(visible_mask));
+                std::array<bool, 4> valid_lane{};
+                for (const auto corner : std::views::iota(std::size_t{0}, std::size_t{4})) {
                     const auto l0 = corner_weights[corner][0];
                     const auto l1 = corner_weights[corner][1];
                     const auto l2 = corner_weights[corner][2];
@@ -363,17 +425,30 @@ namespace raster {
                     // exactly 1.0F, and alpha_i is bitwise identical to l_i.
                     const float w_recip =
                         l0 * triangle.inv_w[0] + l1 * triangle.inv_w[1] + l2 * triangle.inv_w[2];
-                    const float w_pixel = 1.0F / w_recip;
-                    const PixelBarycentrics barycentrics{
-                        .l0 = l0,
-                        .l1 = l1,
-                        .l2 = l2,
-                        .a0 = l0 * triangle.inv_w[0] * w_pixel,
-                        .a1 = l1 * triangle.inv_w[1] * w_pixel,
-                        .a2 = l2 * triangle.inv_w[2] * w_pixel,
-                    };
-                    fragment_callback(corner_x, corner_y, barycentrics);
+                    if (std::isfinite(w_recip) && w_recip > std::numeric_limits<float>::min()) {
+                        const float w_pixel = 1.0F / w_recip;
+                        quad_barycentrics.lanes[corner] = PixelBarycentrics{
+                            .l0 = l0,
+                            .l1 = l1,
+                            .l2 = l2,
+                            .a0 = l0 * triangle.inv_w[0] * w_pixel,
+                            .a1 = l1 * triangle.inv_w[1] * w_pixel,
+                            .a2 = l2 * triangle.inv_w[2] * w_pixel,
+                        };
+                        valid_lane[corner] = std::isfinite(w_pixel);
+                    }
                 }
+                for (const auto corner : std::views::iota(std::size_t{0}, std::size_t{4})) {
+                    if (!valid_lane[corner]) {
+                        quad_barycentrics.lanes[corner] = quad_barycentrics.lanes[fallback_lane];
+                    }
+                }
+
+                fragment_callback(
+                    static_cast<std::size_t>(quad_x),
+                    static_cast<std::size_t>(quad_y),
+                    quad_barycentrics
+                );
                 for (const auto edge_index : std::views::iota(std::size_t{0}, std::size_t{3})) {
                     quad_accumulator[edge_index] += 2 * triangle.step_x[edge_index];
                 }

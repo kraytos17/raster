@@ -78,7 +78,71 @@ namespace raster {
             return mip.texels[mapping(y, x)];
         }
 
+        [[nodiscard]]
+        std::uint32_t sample_trilinear(float u, float v, float lod) const noexcept {
+            const auto clamped_lod = std::clamp(lod, 0.0F, static_cast<float>(levels_.size() - 1U));
+            const auto low_level = static_cast<std::size_t>(std::floor(clamped_lod));
+            const auto high_level = std::min(low_level + 1U, levels_.size() - 1U);
+            const auto fraction = clamped_lod - static_cast<float>(low_level);
+            const auto low = sample_bilinear(u, v, low_level);
+            const auto high = sample_bilinear(u, v, high_level);
+            return blend_color(low, high, fraction);
+        }
+
     private:
+
+        [[nodiscard]]
+        std::uint32_t sample_bilinear(float u, float v, std::size_t mip_level) const noexcept {
+            const auto& mip = levels_[std::min(mip_level, levels_.size() - 1U)];
+            const auto wrap = [](float coordinate) noexcept {
+                return coordinate - std::floor(coordinate);
+            };
+
+            const auto texel_x = wrap(u) * static_cast<float>(mip.width) - 0.5F;
+            const auto texel_y = wrap(v) * static_cast<float>(mip.height) - 0.5F;
+            const auto base_x = static_cast<std::int64_t>(std::floor(texel_x));
+            const auto base_y = static_cast<std::int64_t>(std::floor(texel_y));
+            const auto fraction_x = texel_x - static_cast<float>(base_x);
+            const auto fraction_y = texel_y - static_cast<float>(base_y);
+            const typename View::mapping_type mapping{Extents{mip.height, mip.width}};
+            const auto wrap_index = [](std::int64_t value, std::size_t extent) noexcept {
+                const auto signed_extent = static_cast<std::int64_t>(extent);
+                return static_cast<std::size_t>(
+                    (value % signed_extent + signed_extent) % signed_extent
+                );
+            };
+
+            const auto c00 =
+                mip.texels[mapping(wrap_index(base_y, mip.height), wrap_index(base_x, mip.width))];
+            const auto c10 =
+                mip.texels
+                    [mapping(wrap_index(base_y, mip.height), wrap_index(base_x + 1, mip.width))];
+            const auto c01 =
+                mip.texels
+                    [mapping(wrap_index(base_y + 1, mip.height), wrap_index(base_x, mip.width))];
+            const auto c11 = mip.texels[mapping(
+                wrap_index(base_y + 1, mip.height),
+                wrap_index(base_x + 1, mip.width)
+            )];
+
+            const auto top = blend_color(c00, c10, fraction_x);
+            const auto bottom = blend_color(c01, c11, fraction_x);
+            return blend_color(top, bottom, fraction_y);
+        }
+
+        [[nodiscard]]
+        static std::uint32_t blend_color(std::uint32_t a, std::uint32_t b, float t) noexcept {
+            std::uint32_t result = 0;
+            for (std::size_t channel = 0; channel < 4U; ++channel) {
+                const auto shift = static_cast<std::uint32_t>(channel * 8U);
+                const auto left = static_cast<float>((a >> shift) & 0xFFU);
+                const auto right = static_cast<float>((b >> shift) & 0xFFU);
+                const auto value =
+                    static_cast<std::uint32_t>(std::lround(left + (right - left) * t));
+                result |= (value & 0xFFU) << shift;
+            }
+            return result;
+        }
 
         void build_mips() {
             while (levels_.back().width > 1U || levels_.back().height > 1U) {

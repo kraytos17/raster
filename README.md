@@ -45,6 +45,7 @@ A `Justfile` wraps `CMakePresets.json` for common tasks:
 just                                      # list all recipes
 just doctor                               # verify toolchain and SDL3
 just preset=release-native build          # build a specific preset
+just preset=release-native texture-benchmark # compare row-major, tiled, Morton layouts
 just preset=debug-sanitized test          # run Catch2 test suite
 just preset=debug-sanitized resize-gate   # headless SDL resize/minimize test under ASan
 just preset=debug-sanitized clip-stress-gate # high-poly camera-through + allocation trap
@@ -61,7 +62,7 @@ Override defaults locally by setting `RASTER_PRESET` / `RASTER_JOBS` or copying 
 - [x] **M2 — Fixed-point rasterizer:** 28.4 coordinates, top-left rule, 2×2 quads, seam/coverage tests.
 - [x] **M3 — 3D & perspective interpolation:** Reverse-Z depth, shader concepts, procedural checker scene, and a Catch2 near-to-far render-path test. Interactive visual inspection remains outstanding.
 - [ ] **M4 — Clipping & asset loaders** *(in progress)*: Six-plane clipping remains the default correctness path. The high-poly sanitizer test compares it with an experimental 2× X/Y guard band; for the bundled camera-through traversal the guard band generates fewer output triangles. `just preset=debug-sanitized clip-stress-gate` verifies 120 frames and zero C++ allocations during rendering. Run `just free-look` on a display for interactive visual inspection; mouse moves the view, WASD moves horizontally, Q/E moves vertically, F2 switches clipping policies, and Escape exits.
-- [ ] **M5 — Textures & mipmapping** *(started; incomplete)*: Morton and 4×4 tiled `mdspan` mappings, TGA-to-texture conversion, mip pyramid generation, nearest sampling, and a tested quad derivative/LOD helper are in place. Remaining work: compare layout performance, integrate derivatives and mip LOD selection into the shader, and test partially occluded silhouette quads for mip seams.
+- [ ] **M5 — Textures & mipmapping** *(started; incomplete)*: Morton and 4×4 tiled `mdspan` mappings, TGA-to-texture conversion, mip pyramid generation, bilinear/trilinear sampling, and 2×2 quad derivative-driven shader LOD are implemented. Tests cover mip minification and partially covered, partially occluded helper quads. `just preset=release-native texture-benchmark` compares sequential and shuffled row-major/tiled/Morton accesses; use `perf stat -e cache-references,cache-misses ./build/release-native/raster_texture_benchmark` to record hardware counters. The interactive silhouette artifact check and target-machine measurements remain outstanding.
 - [ ] **M6 — Multithreaded tile engine:** 16×16 tile binning, `std::jthread` work-stealing, per-thread transient arenas, zero-allocation frame verification, and TSan validation.
 
 ### Future Ideas
