@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.28)
 
 project(raster VERSION 0.1.0
-    DESCRIPTION "A C++23 data-oriented software rasterizer"
+    DESCRIPTION "A C++23 software rasterizer"
     LANGUAGES CXX
 )
 
@@ -110,6 +110,7 @@ if(RASTER_BUILD_TESTS)
         tests/test_math.cpp
         tests/test_asset_loaders.cpp
         tests/test_rasterizer.cpp
+        tests/test_scene.cpp
         tests/test_shader.cpp
     )
     target_compile_definitions(raster_tests PRIVATE RASTER_ASSET_DIR="${PROJECT_SOURCE_DIR}/assets")

@@ -57,8 +57,8 @@ Override defaults locally by setting `RASTER_PRESET` / `RASTER_JOBS` or copying 
 
 - [x] **M1 — Framebuffer & SDL3 shell:** Callback lifecycle, HiDPI resize/minimize handling, aligned `mdspan` buffers.
 - [x] **M2 — Fixed-point rasterizer:** 28.4 coordinates, top-left rule, 2×2 quads, seam/coverage tests.
-- [x] **M3 — 3D & perspective interpolation:** Reverse-Z depth, shader concepts, procedural checker scene.
-- [ ] **M4 — Clipping & asset loaders** *(in progress)*: 6-plane clipping and OBJ/TGA loaders are implemented; remaining work is guard-band clipping comparison and high-poly free-look stress testing under UBSan/ASan.
+- [x] **M3 — 3D & perspective interpolation:** Reverse-Z depth, shader concepts, procedural checker scene, and a Catch2 near-to-far render-path test. Interactive visual inspection remains outstanding.
+- [ ] **M4 — Clipping & asset loaders** *(in progress)*: 6-plane clipping and OBJ/TGA loaders are implemented. A bundled high-poly OBJ drives a deterministic camera-through traversal test covering `w <= 0`, extreme screen edges, clipping, fixed-point setup, and rasterization under ASan/UBSan. Interactive free-look visual verification and the guard-band comparison remain outstanding.
 - [ ] **M5 — Textures & mipmapping:** Custom `std::mdspan` layouts (Morton vs. 4×4 tiled vs. row-major), mip pyramids, and 2×2 quad UV derivatives for LOD selection.
 - [ ] **M6 — Multithreaded tile engine:** 16×16 tile binning, `std::jthread` work-stealing, per-thread transient arenas, zero-allocation frame verification, and TSan validation.
 

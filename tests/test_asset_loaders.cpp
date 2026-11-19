@@ -87,6 +87,17 @@ f -4/-4/-1 -3/-3/-1 -2/-2/-1
     }
 
     // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE("bundled clipping sphere fixture loads as a high-poly mesh", "[asset][obj][m4]") {
+        const auto mesh = raster::load_obj(
+            std::filesystem::path{RASTER_ASSET_DIR} / "models/clipping_sphere.obj"
+        );
+        REQUIRE(mesh.has_value());
+        REQUIRE(mesh->triangle_count() == 16U * 32U * 2U);
+        REQUIRE(mesh->has_consistent_vertex_streams());
+        REQUIRE(mesh->positions.size() > 500U);
+    }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
     TEST_CASE("OBJ loader reports malformed and unsupported data", "[asset][obj][errors]") {
         const auto malformed_vertex = raster::parse_obj_buffer("v 0 nope 0\n");
         REQUIRE_FALSE(malformed_vertex.has_value());
