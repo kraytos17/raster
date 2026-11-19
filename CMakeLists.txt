@@ -62,6 +62,8 @@ target_sources(raster_engine INTERFACE
         include/raster/io/tga_loader.hpp
         include/raster/memory/framebuffer.hpp
         include/raster/memory/soa_mesh.hpp
+        include/raster/memory/texture.hpp
+        include/raster/memory/texture_layout.hpp
         include/raster/pipeline/clipper.hpp
         include/raster/pipeline/rasterizer.hpp
         include/raster/pipeline/shader.hpp
@@ -81,6 +83,7 @@ target_compile_options(raster_engine INTERFACE
 add_executable(raster
     src/main.cpp
     src/platform/allocation_probe.cpp
+    src/platform/application.cpp
     src/platform/sdl3_presenter.cpp
     src/render/scene_renderer.cpp
 )
@@ -115,6 +118,7 @@ if(RASTER_BUILD_TESTS)
         tests/test_asset_loaders.cpp
         tests/test_rasterizer.cpp
         tests/test_scene.cpp
+        tests/test_texture.cpp
         tests/test_shader.cpp
     )
     target_compile_definitions(raster_tests PRIVATE RASTER_ASSET_DIR="${PROJECT_SOURCE_DIR}/assets")

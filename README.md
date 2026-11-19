@@ -48,6 +48,7 @@ just preset=release-native build          # build a specific preset
 just preset=debug-sanitized test          # run Catch2 test suite
 just preset=debug-sanitized resize-gate   # headless SDL resize/minimize test under ASan
 just preset=debug-sanitized clip-stress-gate # high-poly camera-through + allocation trap
+just free-look                             # release-native; 1/3-res mouse look + WASD, F2 toggles guard band
 just verify                               # format check, cppcheck, clang-tidy, sanitized tests
 just run                                  # build and run
 ```
@@ -59,8 +60,8 @@ Override defaults locally by setting `RASTER_PRESET` / `RASTER_JOBS` or copying 
 - [x] **M1 — Framebuffer & SDL3 shell:** Callback lifecycle, HiDPI resize/minimize handling, aligned `mdspan` buffers.
 - [x] **M2 — Fixed-point rasterizer:** 28.4 coordinates, top-left rule, 2×2 quads, seam/coverage tests.
 - [x] **M3 — 3D & perspective interpolation:** Reverse-Z depth, shader concepts, procedural checker scene, and a Catch2 near-to-far render-path test. Interactive visual inspection remains outstanding.
-- [ ] **M4 — Clipping & asset loaders** *(in progress)*: 6-plane clipping and OBJ/TGA loaders are implemented. `just preset=debug-sanitized clip-stress-gate` loads a bundled high-poly OBJ and sweeps a deterministic camera through it for 120 frames, checking clipping/rasterization under ASan/UBSan and trapping C++ heap allocations in the render call. Interactive free-look visual verification and the guard-band comparison remain outstanding.
-- [ ] **M5 — Textures & mipmapping:** Custom `std::mdspan` layouts (Morton vs. 4×4 tiled vs. row-major), mip pyramids, and 2×2 quad UV derivatives for LOD selection.
+- [ ] **M4 — Clipping & asset loaders** *(in progress)*: Six-plane clipping remains the default correctness path. The high-poly sanitizer test compares it with an experimental 2× X/Y guard band; for the bundled camera-through traversal the guard band generates fewer output triangles. `just preset=debug-sanitized clip-stress-gate` verifies 120 frames and zero C++ allocations during rendering. Run `just free-look` on a display for interactive visual inspection; mouse moves the view, WASD moves horizontally, Q/E moves vertically, F2 switches clipping policies, and Escape exits.
+- [ ] **M5 — Textures & mipmapping** *(started; incomplete)*: Morton and 4×4 tiled `mdspan` mappings, TGA-to-texture conversion, mip pyramid generation, nearest sampling, and a tested quad derivative/LOD helper are in place. Remaining work: compare layout performance, integrate derivatives and mip LOD selection into the shader, and test partially occluded silhouette quads for mip seams.
 - [ ] **M6 — Multithreaded tile engine:** 16×16 tile binning, `std::jthread` work-stealing, per-thread transient arenas, zero-allocation frame verification, and TSan validation.
 
 ### Future Ideas

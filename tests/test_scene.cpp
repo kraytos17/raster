@@ -251,6 +251,8 @@ namespace {
         std::size_t w_crossing_triangles = 0;
         std::size_t extreme_edge_triangles = 0;
         std::size_t clipped_output_triangles = 0;
+        std::size_t guard_band_output_triangles = 0;
+        std::size_t guard_band_saved_triangles = 0;
         std::size_t rasterized_fragments = 0;
         for (const auto triangle_index : std::views::iota(std::size_t{0}, mesh->triangle_count())) {
             const auto index_base = triangle_index * 3U;
@@ -283,6 +285,26 @@ namespace {
 
             const auto clipped = raster::clip_triangle(shader, vertex_a, vertex_b, vertex_c);
             REQUIRE(clipped.has_value());
+            const auto guard_clipped =
+                raster::clip_triangle_guard_band(shader, vertex_a, vertex_b, vertex_c, 2.0F);
+            REQUIRE(guard_clipped.has_value());
+            guard_band_output_triangles += guard_clipped->size;
+            if (clipped->size > guard_clipped->size) {
+                guard_band_saved_triangles += clipped->size - guard_clipped->size;
+            }
+            for (const auto& guard_triangle :
+                 std::span{guard_clipped->triangles.data(), guard_clipped->size}) {
+                for (const auto& guard_vertex : guard_triangle.vertices) {
+                    REQUIRE(guard_vertex.clip_pos.w > 0.0F);
+                    const auto ndc_x = guard_vertex.clip_pos.x / guard_vertex.clip_pos.w;
+                    const auto ndc_y = guard_vertex.clip_pos.y / guard_vertex.clip_pos.w;
+                    REQUIRE(std::fabs(ndc_x) <= 2.00001F);
+                    REQUIRE(std::fabs(ndc_y) <= 2.00001F);
+                    static_cast<void>(
+                        raster::to_fixed(raster::viewport_to_screen(ndc_x, ndc_y, width, height).x)
+                    );
+                }
+            }
             for (const auto& triangle : std::span{clipped->triangles.data(), clipped->size}) {
                 ++clipped_output_triangles;
                 std::array<raster::ScreenPoint, 3> screen{};
@@ -338,6 +360,8 @@ namespace {
         REQUIRE(w_crossing_triangles > 0U); // camera lies inside the sphere
         REQUIRE(extreme_edge_triangles > 0U);
         REQUIRE(clipped_output_triangles > 0U);
+        REQUIRE(guard_band_output_triangles > 0U);
+        REQUIRE(guard_band_saved_triangles > 0U);
         REQUIRE(rasterized_fragments > 0U);
     }
 } // namespace

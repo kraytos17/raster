@@ -28,6 +28,7 @@ namespace raster {
         PolygonCapacityExceeded,
         InvalidIntersection,
         InvalidSurvivorW,
+        InvalidGuardBand,
     };
 
     template <typename T, std::size_t Capacity> struct FixedPolygon {
@@ -61,16 +62,18 @@ namespace raster {
 
     namespace detail {
         [[nodiscard]]
-        inline float clip_plane_distance(const Vec4f& point, ClipPlane plane) noexcept {
+        inline float clip_plane_distance(
+            const Vec4f& point, ClipPlane plane, float guard_band = 1.0F
+        ) noexcept {
             switch (plane) {
                 case ClipPlane::Left:
-                    return point.x + point.w;
+                    return point.x + guard_band * point.w;
                 case ClipPlane::Right:
-                    return point.w - point.x;
+                    return guard_band * point.w - point.x;
                 case ClipPlane::Bottom:
-                    return point.y + point.w;
+                    return point.y + guard_band * point.w;
                 case ClipPlane::Top:
-                    return point.w - point.y;
+                    return guard_band * point.w - point.y;
                 case ClipPlane::Far:
                     return point.z;
                 case ClipPlane::Near:
@@ -80,11 +83,11 @@ namespace raster {
         }
 
         [[nodiscard]]
-        inline std::uint8_t clip_outcode(const Vec4f& point) noexcept {
+        inline std::uint8_t clip_outcode(const Vec4f& point, float guard_band) noexcept {
             std::uint8_t code = 0;
             for (std::size_t index = 0; index < clip_plane_count; ++index) {
                 const auto plane = static_cast<ClipPlane>(index);
-                if (clip_plane_distance(point, plane) < 0.0F) {
+                if (clip_plane_distance(point, plane, guard_band) < 0.0F) {
                     code = static_cast<std::uint8_t>(code | (1U << index));
                 }
             }
@@ -110,15 +113,21 @@ namespace raster {
     // any perspective divide. Scratch storage and triangle-fan output are
     // fixed-size stack arrays.
     template <ShaderProgram Shader> [[nodiscard]]
-    std::expected<ClippedTriangleFan<typename Shader::Varyings>, ClipError> clip_triangle(
+    std::expected<ClippedTriangleFan<typename Shader::Varyings>, ClipError> clip_triangle_impl(
         const Shader& shader,
         const typename Shader::Varyings& vertex_a,
         const typename Shader::Varyings& vertex_b,
-        const typename Shader::Varyings& vertex_c
+        const typename Shader::Varyings& vertex_c,
+        float guard_band
     ) noexcept {
+        if (!std::isfinite(guard_band) || guard_band < 1.0F) {
+            return std::unexpected{ClipError::InvalidGuardBand};
+        }
+
         using VaryingsT = Shader::Varyings;
         FixedPolygon<VaryingsT, clip_polygon_capacity> input{};
         FixedPolygon<VaryingsT, clip_polygon_capacity> output{};
+
         input.vertices[0] = vertex_a;
         input.vertices[1] = vertex_b;
         input.vertices[2] = vertex_c;
@@ -132,7 +141,7 @@ namespace raster {
                 return std::unexpected{ClipError::NonFiniteVertex};
             }
 
-            const auto code = detail::clip_outcode(vertex->clip_pos);
+            const auto code = detail::clip_outcode(vertex->clip_pos, guard_band);
             common_outcode = static_cast<std::uint8_t>(common_outcode & code);
             combined_outcode = static_cast<std::uint8_t>(combined_outcode | code);
         }
@@ -163,11 +172,13 @@ namespace raster {
             }
 
             const VaryingsT* previous = &input.vertices[input.size - 1];
-            float previous_distance = detail::clip_plane_distance(previous->clip_pos, plane);
+            float previous_distance =
+                detail::clip_plane_distance(previous->clip_pos, plane, guard_band);
             bool previous_inside = previous_distance >= 0.0F;
             for (std::size_t vertex_index = 0; vertex_index < input.size; ++vertex_index) {
                 const VaryingsT& current = input.vertices[vertex_index];
-                const float current_distance = detail::clip_plane_distance(current.clip_pos, plane);
+                const float current_distance =
+                    detail::clip_plane_distance(current.clip_pos, plane, guard_band);
                 const bool current_inside = current_distance >= 0.0F;
                 if (current_inside != previous_inside) {
                     if (output.size >= clip_polygon_capacity) {
@@ -215,5 +226,29 @@ namespace raster {
             };
         }
         return fan;
+    }
+
+    template <ShaderProgram Shader> [[nodiscard]]
+    std::expected<ClippedTriangleFan<typename Shader::Varyings>, ClipError> clip_triangle(
+        const Shader& shader,
+        const typename Shader::Varyings& vertex_a,
+        const typename Shader::Varyings& vertex_b,
+        const typename Shader::Varyings& vertex_c
+    ) noexcept {
+        return clip_triangle_impl(shader, vertex_a, vertex_b, vertex_c, 1.0F);
+    }
+
+    // Experimental wider X/Y clipping envelope. Near/far remain canonical;
+    // the screen-space rasterizer still clamps coverage to the viewport.
+    template <ShaderProgram Shader> [[nodiscard]]
+    std::
+        expected<ClippedTriangleFan<typename Shader::Varyings>, ClipError> clip_triangle_guard_band(
+            const Shader& shader,
+            const typename Shader::Varyings& vertex_a,
+            const typename Shader::Varyings& vertex_b,
+            const typename Shader::Varyings& vertex_c,
+            float guard_band
+        ) noexcept {
+        return clip_triangle_impl(shader, vertex_a, vertex_b, vertex_c, guard_band);
     }
 } // namespace raster

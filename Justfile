@@ -84,6 +84,13 @@ resize-gate: (_build preset 'raster')
 clip-stress-gate: (_build preset 'raster')
     RASTER_CLIP_STRESS_TEST=1 SDL_VIDEODRIVER=dummy ./{{ build_dir }}/raster
 
+# Interactive loaded-sphere mode, built optimized for responsive controls.
+# Mouse-look, WASD strafe, Q/E vertical, F2 toggles guard band, Escape exits.
+free-look:
+    cmake --preset release-native
+    cmake --build --preset release-native --parallel {{ jobs }} --target raster
+    RASTER_FREE_LOOK_TEST=1 ./build/release-native/raster
+
 # Reformat all project C++ files.
 format: (_build preset 'format')
 

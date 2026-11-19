@@ -12,6 +12,7 @@
 
 #include "raster/math/mat.hpp"
 #include "raster/math/vec.hpp"
+#include "raster/memory/texture.hpp"
 #include "raster/pipeline/clipper.hpp"
 #include "raster/pipeline/rasterizer.hpp"
 #include "raster/pipeline/shader.hpp"
@@ -41,6 +42,7 @@ namespace raster::render {
         struct FloorShader final : ShaderBase {
             struct Uniforms {
                 Mat4f model_view_projection{};
+                const Texture2D<LayoutTiled4x4>* texture{};
             };
 
             Uniforms uniforms{};
@@ -71,11 +73,20 @@ namespace raster::render {
 
             [[nodiscard]]
             constexpr Vec4f fragment(const Varyings& varying) const noexcept {
-                const auto cell = static_cast<int>(std::floor(varying.uv.x))
-                    + static_cast<int>(std::floor(varying.uv.y));
-                const auto parity = ((cell % 2) + 2) % 2;
-                const auto shade = parity == 0 ? 0.85F : 0.35F;
-                return Vec4f{.x = shade, .y = shade, .z = shade, .w = 1.0F};
+                const auto texel = uniforms.texture == nullptr
+                    ? ((static_cast<int>(std::floor(varying.uv.x))
+                        + static_cast<int>(std::floor(varying.uv.y)))
+                               % 2
+                               == 0
+                           ? 0xFFCCCCCCU
+                           : 0xFF555555U)
+                    : uniforms.texture->sample_nearest(varying.uv.x, varying.uv.y);
+                return Vec4f{
+                    .x = static_cast<float>((texel >> 16U) & 0xFFU) / 255.0F,
+                    .y = static_cast<float>((texel >> 8U) & 0xFFU) / 255.0F,
+                    .z = static_cast<float>(texel & 0xFFU) / 255.0F,
+                    .w = 1.0F,
+                };
             }
         };
 
@@ -201,7 +212,7 @@ namespace raster::render {
 
         [[nodiscard]]
         bool draw_mesh(
-            Framebuffer& framebuffer, FloorShader& shader, const SoAMesh& mesh
+            Framebuffer& framebuffer, FloorShader& shader, const SoAMesh& mesh, bool guard_band_test
         ) noexcept {
             for (const auto triangle_index :
                  std::views::iota(std::size_t{0}, mesh.triangle_count())) {
@@ -212,7 +223,9 @@ namespace raster::render {
                 const auto varying_a = shader.vertex(mesh.positions[vertex_a], mesh.uvs[vertex_a]);
                 const auto varying_b = shader.vertex(mesh.positions[vertex_b], mesh.uvs[vertex_b]);
                 const auto varying_c = shader.vertex(mesh.positions[vertex_c], mesh.uvs[vertex_c]);
-                const auto clipped = clip_triangle(shader, varying_a, varying_b, varying_c);
+                const auto clipped = guard_band_test
+                    ? clip_triangle_guard_band(shader, varying_a, varying_b, varying_c, 2.0F)
+                    : clip_triangle(shader, varying_a, varying_b, varying_c);
                 if (!clipped) {
                     return false;
                 }
@@ -234,7 +247,11 @@ namespace raster::render {
         Framebuffer& framebuffer,
         const SoAMesh& mesh,
         std::uint64_t elapsed_ns,
-        bool clip_stress_test
+        bool clip_stress_test,
+        bool free_look_test,
+        bool guard_band_test,
+        const Texture2D<LayoutTiled4x4>& texture,
+        const FreeLookCamera& camera
     ) noexcept {
         const auto width = framebuffer.width;
         const auto height = framebuffer.height;
@@ -247,34 +264,53 @@ namespace raster::render {
         const auto seconds = static_cast<float>(static_cast<double>(elapsed_ns) * 1e-9);
         const auto stress_phase = std::fmod(seconds * 0.5F, 2.0F);
         const auto sweep = stress_phase <= 1.0F ? stress_phase : 2.0F - stress_phase;
-        const auto eye = clip_stress_test ? Vec3f{.x = -3.0F + 6.0F * sweep, .y = 0.0F, .z = 0.0F}
-                                          : Vec3f{
-                                                .x = 0.05F * std::sin(seconds * 0.3F),
-                                                .y = 0.1F,
-                                                .z = 0.05F * std::cos(seconds * 0.3F),
-                                            };
-        const auto view = look_at4f(
-            eye,
-            Vec3f{
-                .x = eye.x,
-                .y = clip_stress_test ? eye.y : eye.y - 0.0001F,
-                .z = eye.z - 1.0F,
-            },
-            Vec3f{.x = 0.0F, .y = 1.0F, .z = 0.0F}
-        );
+        const auto eye = [&]() -> Vec3f {
+            if (clip_stress_test) {
+                return {.x = -3.0F + 6.0F * sweep, .y = 0.0F, .z = 0.0F};
+            }
+            if (free_look_test) {
+                return camera.position;
+            }
+            return {
+                .x = 0.05F * std::sin(seconds * 0.3F),
+                .y = 0.1F,
+                .z = 0.05F * std::cos(seconds * 0.3F),
+            };
+        }();
+        const auto view = [&] {
+            if (free_look_test) {
+                const auto cosine_pitch = std::cos(camera.pitch);
+                const Vec3f direction{
+                    .x = std::sin(camera.yaw) * cosine_pitch,
+                    .y = std::sin(camera.pitch),
+                    .z = -std::cos(camera.yaw) * cosine_pitch,
+                };
+                return look_at4f(eye, eye + direction, Vec3f{.x = 0.0F, .y = 1.0F, .z = 0.0F});
+            }
+            return look_at4f(
+                eye,
+                Vec3f{
+                    .x = eye.x,
+                    .y = clip_stress_test ? eye.y : eye.y - 0.0001F,
+                    .z = eye.z - 1.0F,
+                },
+                Vec3f{.x = 0.0F, .y = 1.0F, .z = 0.0F}
+            );
+        }();
         const auto projection = perspective_reverse_z4f(
             1.2566371F,
             static_cast<float>(width) / static_cast<float>(height),
-            clip_stress_test ? 0.05F : 0.1F,
-            clip_stress_test ? 10.0F : 1000.0F
+            clip_stress_test || free_look_test ? 0.05F : 0.1F,
+            clip_stress_test || free_look_test ? 10.0F : 1000.0F
         );
 
         FloorShader shader{};
         shader.uniforms.model_view_projection = projection * view;
-        if (!draw_mesh(framebuffer, shader, mesh)) {
+        shader.uniforms.texture = &texture;
+        if (!draw_mesh(framebuffer, shader, mesh, guard_band_test)) {
             return false;
         }
-        if (clip_stress_test) {
+        if (clip_stress_test || free_look_test) {
             return true;
         }
 
