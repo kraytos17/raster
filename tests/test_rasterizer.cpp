@@ -1,6 +1,8 @@
+#include <algorithm>
 #include <catch2/catch_test_macros.hpp>
 #include <cstddef>
 #include <cstdint>
+#include <mdspan>
 #include <ranges>
 #include <vector>
 
@@ -366,6 +368,238 @@ namespace {
         }
         REQUIRE(counters.counts[100 * size + 0] == 1);
         REQUIRE(counters.counts[255 * size + 255] == 1);
+    }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE(
+        "perspective weights default to screen weights when inv_w is one",
+        "[rasterizer][perspective]"
+    ) {
+        constexpr std::size_t size = 32;
+        CoverageCounters counters{size, size};
+        bool weights_identical = true;
+
+        const auto triangle = raster::make_screen_triangle(
+            raster::ScreenPoint{.x = 10.25F, .y = 10.25F},
+            raster::ScreenPoint{.x = 30.25F, .y = 10.25F},
+            raster::ScreenPoint{.x = 20.25F, .y = 30.25F},
+            std::array<float, 3>{1.0F, 1.0F, 1.0F},
+            std::array<float, 3>{0.25F, 0.5F, 0.75F}
+        );
+        REQUIRE(triangle.has_value());
+        raster::rasterize_triangle(
+            *triangle,
+            size,
+            size,
+            [&](std::size_t x, std::size_t y, const raster::PixelBarycentrics& bary) noexcept {
+            counters.record(x, y, size, 1, bary);
+            weights_identical =
+                weights_identical && bary.a0 == bary.l0 && bary.a1 == bary.l1 && bary.a2 == bary.l2;
+        }
+        );
+
+        REQUIRE(counters.barycentrics_valid);
+        REQUIRE(counters.covered_pixels > 0);
+        REQUIRE(weights_identical);
+    }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE("perspective weights match the independent derivation", "[rasterizer][perspective]") {
+        // The rasterizer computes alpha_i = l_i * inv_w_i * (1 / sum(l_j *
+        // inv_w_j)); the geometrically independent form is
+        // alpha_i = (l_i * inv_w_i) / sum(l_j * inv_w_j). They must agree.
+        constexpr std::size_t size = 32;
+        CoverageCounters counters{size, size};
+        bool weights_match = true;
+        bool weights_sum_to_one = true;
+
+        const auto triangle = raster::make_screen_triangle(
+            raster::ScreenPoint{.x = 10.25F, .y = 10.25F},
+            raster::ScreenPoint{.x = 30.25F, .y = 10.25F},
+            raster::ScreenPoint{.x = 20.25F, .y = 30.25F},
+            std::array<float, 3>{1.0F, 0.5F, 2.0F},
+            std::array<float, 3>{0.25F, 0.75F, 0.5F}
+        );
+        REQUIRE(triangle.has_value());
+        raster::rasterize_triangle(
+            *triangle,
+            size,
+            size,
+            [&](std::size_t x, std::size_t y, const raster::PixelBarycentrics& bary) noexcept {
+            counters.record(x, y, size, 1, bary);
+            const float w_recip = bary.l0 * 1.0F + bary.l1 * 0.5F + bary.l2 * 2.0F;
+            const auto independent_a0 = (bary.l0 * 1.0F) / w_recip;
+            const auto independent_a1 = (bary.l1 * 0.5F) / w_recip;
+            const auto independent_a2 = (bary.l2 * 2.0F) / w_recip;
+            weights_match = weights_match
+                && std::fabs(bary.a0 - independent_a0)
+                <= 1e-6F
+                && std::fabs(bary.a1 - independent_a1)
+                <= 1e-6F
+                && std::fabs(bary.a2 - independent_a2)
+                <= 1e-6F;
+            weights_sum_to_one =
+                weights_sum_to_one && std::fabs(bary.a0 + bary.a1 + bary.a2 - 1.0F) <= 1e-5F;
+        }
+        );
+
+        REQUIRE(counters.barycentrics_valid);
+        REQUIRE(counters.covered_pixels > 0);
+        REQUIRE(weights_match);
+        REQUIRE(weights_sum_to_one);
+    }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE("depth-enabled rasterizer skips fully occluded pixels", "[rasterizer][depth]") {
+        constexpr std::size_t size = 32;
+        std::vector<float> depth_storage(size * size, 0.0F);
+        auto depth = std::mdspan<float, raster::Extents2D>{depth_storage.data(), size, size};
+        std::uint32_t far_shaded = 0;
+        std::uint32_t near_shaded = 0;
+        std::uint32_t occluded_resubmission_shaded = 0;
+
+        const auto far_triangle = raster::make_screen_triangle(
+            raster::ScreenPoint{.x = 4.25F, .y = 4.25F},
+            raster::ScreenPoint{.x = 20.25F, .y = 4.25F},
+            raster::ScreenPoint{.x = 12.25F, .y = 20.25F},
+            std::array<float, 3>{1.0F, 1.0F, 1.0F},
+            std::array<float, 3>{0.25F, 0.25F, 0.25F}
+        );
+        const auto near_triangle = raster::make_screen_triangle(
+            raster::ScreenPoint{.x = 8.25F, .y = 8.25F},
+            raster::ScreenPoint{.x = 24.25F, .y = 8.25F},
+            raster::ScreenPoint{.x = 16.25F, .y = 24.25F},
+            std::array<float, 3>{1.0F, 1.0F, 1.0F},
+            std::array<float, 3>{0.75F, 0.75F, 0.75F}
+        );
+        REQUIRE(far_triangle.has_value());
+        REQUIRE(near_triangle.has_value());
+
+        raster::rasterize_triangle(
+            *far_triangle,
+            size,
+            size,
+            depth,
+            [&](std::size_t, std::size_t, const raster::PixelBarycentrics&) noexcept {
+            ++far_shaded;
+        }
+        );
+        const auto far_shaded_first = far_shaded;
+        REQUIRE(far_shaded_first > 0U);
+        REQUIRE(std::ranges::all_of(depth_storage, [](float value) noexcept {
+            return value >= 0.0F && value <= 0.25F;
+        }));
+
+        raster::rasterize_triangle(
+            *near_triangle,
+            size,
+            size,
+            depth,
+            [&](std::size_t, std::size_t, const raster::PixelBarycentrics&) noexcept {
+            ++near_shaded;
+        }
+        );
+        REQUIRE(near_shaded > 0U);
+        REQUIRE(std::ranges::all_of(depth_storage, [](float value) noexcept {
+            return value >= 0.0F && value <= 0.75F;
+        }));
+
+        // Equal far depth fails strict `z_pixel > depth`; this exact rerender
+        // must be rejected at the depth test and never invoke the callback.
+        raster::rasterize_triangle(
+            *far_triangle,
+            size,
+            size,
+            depth,
+            [&](std::size_t, std::size_t, const raster::PixelBarycentrics&) noexcept {
+            ++occluded_resubmission_shaded;
+        }
+        );
+        REQUIRE(occluded_resubmission_shaded == 0U);
+        REQUIRE(far_shaded == far_shaded_first);
+    }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE("reverse-z early depth keeps the nearest surface", "[rasterizer][depth]") {
+        constexpr std::size_t size = 32;
+        std::vector<float> depth_storage(size * size, 0.0F);
+        std::vector<std::uint32_t> color_storage(size * size, 0U);
+        std::vector<std::uint32_t> far_first_count(size * size, 0U);
+        std::vector<std::uint32_t> near_count(size * size, 0U);
+        std::vector<std::uint32_t> far_second_count(size * size, 0U);
+        auto depth = std::mdspan<float, raster::Extents2D>{depth_storage.data(), size, size};
+
+        const auto far_triangle = raster::make_screen_triangle(
+            raster::ScreenPoint{.x = 4.25F, .y = 4.25F},
+            raster::ScreenPoint{.x = 20.25F, .y = 4.25F},
+            raster::ScreenPoint{.x = 12.25F, .y = 20.25F},
+            std::array<float, 3>{1.0F, 1.0F, 1.0F},
+            std::array<float, 3>{0.25F, 0.25F, 0.25F}
+        );
+        const auto near_triangle = raster::make_screen_triangle(
+            raster::ScreenPoint{.x = 8.25F, .y = 8.25F},
+            raster::ScreenPoint{.x = 24.25F, .y = 8.25F},
+            raster::ScreenPoint{.x = 16.25F, .y = 24.25F},
+            std::array<float, 3>{1.0F, 1.0F, 1.0F},
+            std::array<float, 3>{0.75F, 0.75F, 0.75F}
+        );
+        REQUIRE(far_triangle.has_value());
+        REQUIRE(near_triangle.has_value());
+
+        const auto color_fragment = [&](std::uint32_t id) noexcept {
+            return
+                [&, id](std::size_t x, std::size_t y, const raster::PixelBarycentrics&) noexcept {
+                color_storage[y * size + x] = id;
+            };
+        };
+        raster::rasterize_triangle(*far_triangle, size, size, depth, color_fragment(1U));
+        for (const auto index : std::views::iota(std::size_t{0}, color_storage.size())) {
+            if (color_storage[index] == 1U) {
+                far_first_count[index] = 1U;
+            }
+        }
+        raster::rasterize_triangle(*near_triangle, size, size, depth, color_fragment(2U));
+        for (const auto index : std::views::iota(std::size_t{0}, color_storage.size())) {
+            if (color_storage[index] == 2U) {
+                near_count[index] = 1U;
+            }
+        }
+        // Re-drawing the far triangle must be rejected everywhere by the
+        // strictly-nearer reverse-Z test without invoking the fragment even
+        // once — the quad-level early-Z path.
+        raster::rasterize_triangle(*far_triangle, size, size, depth, color_fragment(3U));
+        for (const auto index : std::views::iota(std::size_t{0}, color_storage.size())) {
+            if (color_storage[index] == 3U) {
+                far_second_count[index] = 1U;
+            }
+        }
+
+        bool overlap_exists = false;
+        bool near_depths_correct = true;
+        bool far_depths_correct = true;
+        for (const auto index : std::views::iota(std::size_t{0}, color_storage.size())) {
+            overlap_exists =
+                overlap_exists || (far_first_count[index] == 1U && near_count[index] == 1U);
+            if (near_count[index] == 1U) {
+                near_depths_correct = near_depths_correct
+                    && depth_storage[index]
+                    > 0.749999F
+                    && depth_storage[index]
+                    < 0.750001F;
+            } else if (far_first_count[index] == 1U) {
+                far_depths_correct = far_depths_correct
+                    && depth_storage[index]
+                    > 0.249999F
+                    && depth_storage[index]
+                    < 0.250001F;
+            }
+        }
+        REQUIRE(overlap_exists);
+        REQUIRE(near_depths_correct);
+        REQUIRE(far_depths_correct);
+        REQUIRE(std::ranges::all_of(far_second_count, [](std::uint32_t count) noexcept {
+            return count == 0U;
+        }));
     }
 
 } // namespace

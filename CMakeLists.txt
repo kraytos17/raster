@@ -56,8 +56,11 @@ target_sources(raster_engine INTERFACE
     BASE_DIRS include
     FILES
         include/raster/math/barycentric.hpp
+        include/raster/math/mat.hpp
+        include/raster/math/vec.hpp
         include/raster/memory/framebuffer.hpp
         include/raster/pipeline/rasterizer.hpp
+        include/raster/pipeline/shader.hpp
         include/raster/platform/sdl3_presenter.hpp
 )
 target_include_directories(raster_engine INTERFACE
@@ -98,7 +101,9 @@ if(RASTER_BUILD_TESTS)
 
     add_executable(raster_tests
         tests/test_framebuffer.cpp
+        tests/test_math.cpp
         tests/test_rasterizer.cpp
+        tests/test_shader.cpp
     )
 
     target_link_libraries(raster_tests PRIVATE raster::engine Catch2::Catch2WithMain)

@@ -37,17 +37,18 @@ With the optional tools installed, use `just format`, `just check-format`, `just
 `just lint`. Configure with `--preset tidy` to run clang-tidy as part
 of compilation. Run `scripts/hooks-install.sh` to opt in to the staged C++ formatting hook.
 
-The first milestone displays an animated procedural gradient in an SDL3 resizable, high-DPI
-window and reports presentation FPS. Close the window to exit. The framebuffer handles tile
-clearing and resizes while preserving 64-byte alignment.
+The SDL3 callback application displays the current software-rendered scene in a resizable,
+high-DPI window. The 64-byte-aligned framebuffer supports depth storage and tile-local clearing.
 
-Milestone 2 replaces the gradient with a screen-space scene rasterized by the 28.4 fixed-point
-half-space rasterizer: the watertight 100-triangle mesh proven by the unit tests, vertex-colored
-from grid position, plus a spinning RGB triangle. `just test` covers the gate suite — watertight
-seam coverage, top-left fill-rule ownership, the exact barycentric partition, 64-bit overflow
-safety for triangles wider than 4096 pixels, and the fragment-callback concept contract.
+The current renderer implements the first three milestones: a watertight 28.4 fixed-point
+2x2-quad triangle rasterizer; constexpr vector/matrix arithmetic with portable compile-time
+reverse-Z projection checks; and a reverse-Z perspective-correct checkerboard floor. Runtime
+norms, camera rotations, field-of-view conversion, and checker indexing use `std::` math.
+The constexpr reverse-Z projection constructor accepts the already-computed focal scale so its
+near/far depth invariant can be checked during constant evaluation without requiring constexpr
+`std::tan` on every supported C++23 compiler. Shader interpolation is constrained by
+`ShaderProgram` and implemented by the `ShaderBase` tuple mixin.
 
-Run the automated resize/minimize/restore verification gate with
-`just preset=debug-sanitized resize-gate`: it drives the real SDL3 callbacks through several
-window resizes, a minimize/restore cycle, and a final size check using SDL's dummy video
-driver, failing the app if the framebuffer does not track the window.
+Run the automated framebuffer resize/minimize/restore gate with
+`just preset=debug-sanitized resize-gate`; it uses SDL3's dummy video driver and exercises the
+real callback lifecycle under ASan/UBSan.

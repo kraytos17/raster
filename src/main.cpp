@@ -10,9 +10,13 @@
 #include <ranges>
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
+#include <tuple>
 
+#include "raster/math/mat.hpp"
+#include "raster/math/vec.hpp"
 #include "raster/memory/framebuffer.hpp"
 #include "raster/pipeline/rasterizer.hpp"
+#include "raster/pipeline/shader.hpp"
 #include "raster/platform/sdl3_presenter.hpp"
 
 namespace {
@@ -45,9 +49,11 @@ namespace {
         const raster::ScreenPoint& c,
         const Rgb& color_a,
         const Rgb& color_b,
-        const Rgb& color_c
+        const Rgb& color_c,
+        const std::array<float, 3>& inv_w = std::array<float, 3>{1.0F, 1.0F, 1.0F},
+        const std::array<float, 3>& z_ndc = std::array<float, 3>{0.0F, 0.0F, 0.0F}
     ) noexcept {
-        auto triangle = raster::make_screen_triangle(a, b, c);
+        auto triangle = raster::make_screen_triangle(a, b, c, inv_w, z_ndc);
         if (!triangle.has_value()) {
             return;
         }
@@ -57,6 +63,7 @@ namespace {
             *triangle,
             framebuffer.width,
             framebuffer.height,
+            framebuffer.depth_view(),
             [&](std::size_t x,
                 std::size_t y,
                 const raster::PixelBarycentrics& barycentrics) noexcept {
@@ -85,6 +92,132 @@ namespace {
         );
     }
 
+    struct FloorShader final : raster::ShaderBase {
+        struct Uniforms {
+            raster::Mat4f model_view_proj{};
+        };
+
+        Uniforms uniforms{};
+
+        struct Varyings {
+            raster::Vec4f clip_pos{};
+            raster::Vec2f uv{};
+
+            [[nodiscard]]
+            constexpr auto attributes(this const Varyings& self) noexcept {
+                return std::tie(self.uv);
+            }
+        };
+
+        [[nodiscard]]
+        constexpr Varyings vertex(raster::Vec3f position, raster::Vec2f uv) const noexcept {
+            return Varyings{
+                .clip_pos = uniforms.model_view_proj
+                    * raster::Vec4f{
+                        .x = position.x,
+                        .y = position.y,
+                        .z = position.z,
+                        .w = 1.0F,
+                    },
+                .uv = uv,
+            };
+        }
+
+        [[nodiscard]]
+        constexpr raster::Vec4f fragment(const Varyings& varying) const noexcept {
+            const auto cell = static_cast<int>(std::floor(varying.uv.x))
+                + static_cast<int>(std::floor(varying.uv.y));
+            const auto parity = ((cell % 2) + 2) % 2;
+            const auto shade = parity == 0 ? 0.85F : 0.35F;
+            return raster::Vec4f{.x = shade, .y = shade, .z = shade, .w = 1.0F};
+        }
+    };
+
+    static_assert(raster::ShaderProgram<FloorShader>);
+
+    void draw_floor_triangle(
+        raster::Framebuffer& framebuffer,
+        FloorShader& shader,
+        const raster::Vec3f& world_a,
+        const raster::Vec3f& world_b,
+        const raster::Vec3f& world_c,
+        const raster::Vec2f& uv_a,
+        const raster::Vec2f& uv_b,
+        const raster::Vec2f& uv_c
+    ) noexcept {
+        const auto varying_a = shader.vertex(world_a, uv_a);
+        const auto varying_b = shader.vertex(world_b, uv_b);
+        const auto varying_c = shader.vertex(world_c, uv_c);
+        if (varying_a.clip_pos.w
+            <= 0.0F
+            || varying_b.clip_pos.w
+            <= 0.0F
+            || varying_c.clip_pos.w
+            <= 0.0F) {
+            return;
+        }
+
+        const std::array<float, 3> inv_w{
+            1.0F / varying_a.clip_pos.w,
+            1.0F / varying_b.clip_pos.w,
+            1.0F / varying_c.clip_pos.w,
+        };
+        const std::array<float, 3> z_ndc{
+            varying_a.clip_pos.z * inv_w[0],
+            varying_b.clip_pos.z * inv_w[1],
+            varying_c.clip_pos.z * inv_w[2],
+        };
+
+        const auto viewport_width = framebuffer.width;
+        const auto viewport_height = framebuffer.height;
+        const std::array<raster::ScreenPoint, 3> screen{
+            raster::viewport_to_screen(
+                varying_a.clip_pos.x * inv_w[0],
+                varying_a.clip_pos.y * inv_w[0],
+                viewport_width,
+                viewport_height
+            ),
+            raster::viewport_to_screen(
+                varying_b.clip_pos.x * inv_w[1],
+                varying_b.clip_pos.y * inv_w[1],
+                viewport_width,
+                viewport_height
+            ),
+            raster::viewport_to_screen(
+                varying_c.clip_pos.x * inv_w[2],
+                varying_c.clip_pos.y * inv_w[2],
+                viewport_width,
+                viewport_height
+            ),
+        };
+
+        auto triangle = raster::make_screen_triangle(screen[0], screen[1], screen[2], inv_w, z_ndc);
+        if (!triangle.has_value()) {
+            return;
+        }
+
+        auto color = framebuffer.color_view();
+        raster::rasterize_triangle(
+            *triangle,
+            viewport_width,
+            viewport_height,
+            framebuffer.depth_view(),
+            [&](std::size_t x,
+                std::size_t y,
+                const raster::PixelBarycentrics& barycentrics) noexcept {
+            const auto attributes =
+                shader.interpolate(varying_a, varying_b, varying_c, barycentrics);
+            const FloorShader::Varyings interpolated{
+                .clip_pos = varying_a.clip_pos,
+                .uv = std::get<0>(attributes),
+            };
+
+            const auto shaded = shader.fragment(interpolated);
+            color[y, x] = to_argb(Rgb{.r = shaded.x, .g = shaded.y, .b = shaded.z});
+        }
+        );
+    }
+
     void render_scene(raster::Framebuffer& framebuffer, std::uint64_t elapsed_ns) noexcept {
         const auto width = framebuffer.width;
         const auto height = framebuffer.height;
@@ -93,56 +226,73 @@ namespace {
         }
 
         std::ranges::fill(framebuffer.color_storage, 0xFF101018U);
-        std::array<float, 11> grid_x{};
-        std::array<float, 6> grid_y{};
-        for (const auto column : std::views::iota(std::size_t{0}, std::size_t{11})) {
-            grid_x[column] = static_cast<float>(column) * static_cast<float>(width) / 10.0F;
-        }
-        for (const auto row : std::views::iota(std::size_t{0}, std::size_t{6})) {
-            grid_y[row] = static_cast<float>(row) * static_cast<float>(height) / 5.0F;
-        }
-        const auto vertex_color = [](std::size_t column, std::size_t row) noexcept {
-            const auto u = static_cast<float>(column) / 10.0F;
-            const auto v = static_cast<float>(row) / 5.0F;
-            return Rgb{.r = u, .g = v, .b = 0.5F};
+        std::ranges::fill(framebuffer.depth_storage, 0.0F);
+        const auto seconds = static_cast<float>(static_cast<double>(elapsed_ns) * 1e-9);
+        const auto eye = raster::Vec3f{
+            .x = 0.05F * std::sin(seconds * 0.3F),
+            .y = 0.1F,
+            .z = 0.05F * std::cos(seconds * 0.3F),
         };
+        const auto view = raster::look_at4f(
+            eye,
+            // Only a slight downward pitch lets the floor remain visible at
+            // z=1000 while the near rows occupy the lower part of the view.
+            raster::Vec3f{.x = eye.x, .y = eye.y - 0.0001F, .z = eye.z - 1.0F},
+            raster::Vec3f{.x = 0.0F, .y = 1.0F, .z = 0.0F}
+        );
+        const auto projection = raster::perspective_reverse_z4f(
+            1.2566371F, // 72 degrees
+            static_cast<float>(width) / static_cast<float>(height),
+            0.1F,
+            1000.0F
+        );
 
-        for (const auto row : std::views::iota(std::size_t{0}, std::size_t{5})) {
-            for (const auto column : std::views::iota(std::size_t{0}, std::size_t{10})) {
-                const raster::ScreenPoint top_left{.x = grid_x[column], .y = grid_y[row]};
-                const raster::ScreenPoint top_right{.x = grid_x[column + 1], .y = grid_y[row]};
-                const raster::ScreenPoint bottom_right{
-                    .x = grid_x[column + 1],
-                    .y = grid_y[row + 1],
-                };
-
-                const raster::ScreenPoint bottom_left{.x = grid_x[column], .y = grid_y[row + 1]};
-                const Rgb color_top_left = vertex_color(column, row);
-                const Rgb color_top_right = vertex_color(column + 1, row);
-                const Rgb color_bottom_right = vertex_color(column + 1, row + 1);
-                const Rgb color_bottom_left = vertex_color(column, row + 1);
-                draw_shaded_triangle(
+        FloorShader shader{};
+        shader.uniforms.model_view_proj = projection * view;
+        constexpr float floor_y = 0.0F;
+        for (const auto row : std::views::iota(std::size_t{0}, std::size_t{999})) {
+            const auto z_near = 0.1F + static_cast<float>(row);
+            const auto z_far = row == 998 ? 1000.0F : z_near + 1.0F;
+            for (const auto column : std::views::iota(std::size_t{0}, std::size_t{8})) {
+                const auto x_left = -4.0F + static_cast<float>(column);
+                const auto x_right = x_left + 1.0F;
+                // Horizontal floor at y=0, extending away from the RH
+                // camera along view -Z. The camera points down slightly so
+                // all 0.1..1000 rows remain in front of the near plane.
+                const raster::Vec3f near_left{.x = x_left, .y = floor_y, .z = -z_near};
+                const raster::Vec3f near_right{.x = x_right, .y = floor_y, .z = -z_near};
+                const raster::Vec3f far_right{.x = x_right, .y = floor_y, .z = -z_far};
+                const raster::Vec3f far_left{.x = x_left, .y = floor_y, .z = -z_far};
+                const raster::Vec2f uv_near_left{.x = x_left * 0.5F, .y = z_near * 0.5F};
+                const raster::Vec2f uv_near_right{.x = x_right * 0.5F, .y = z_near * 0.5F};
+                const raster::Vec2f uv_far_right{.x = x_right * 0.5F, .y = z_far * 0.5F};
+                const raster::Vec2f uv_far_left{.x = x_left * 0.5F, .y = z_far * 0.5F};
+                draw_floor_triangle(
                     framebuffer,
-                    top_left,
-                    top_right,
-                    bottom_right,
-                    color_top_left,
-                    color_top_right,
-                    color_bottom_right
+                    shader,
+                    near_left,
+                    far_right,
+                    near_right,
+                    uv_near_left,
+                    uv_far_right,
+                    uv_near_right
                 );
-                draw_shaded_triangle(
+                draw_floor_triangle(
                     framebuffer,
-                    top_left,
-                    bottom_right,
-                    bottom_left,
-                    color_top_left,
-                    color_bottom_right,
-                    color_bottom_left
+                    shader,
+                    near_left,
+                    far_left,
+                    far_right,
+                    uv_near_left,
+                    uv_far_left,
+                    uv_far_right
                 );
             }
         }
 
-        // One spinning RGB triangle on top to keep the scene animated.
+        // One spinning RGB overlay on top to keep the scene animated. Its
+        // reverse-Z sentinel of 2.0 lies beyond the [0, 1] depth range on
+        // purpose: it is nearer than any floor pixel, so it always wins.
         const auto theta = static_cast<float>(static_cast<double>(elapsed_ns) * 1.5e-9);
         const auto center_x = static_cast<float>(width) * 0.5F;
         const auto center_y = static_cast<float>(height) * 0.5F;
@@ -160,7 +310,17 @@ namespace {
                 .y = center_y + radius * std::sin(angle),
             };
         }
-        draw_shaded_triangle(framebuffer, spinner[0], spinner[1], spinner[2], red, green, blue);
+        draw_shaded_triangle(
+            framebuffer,
+            spinner[0],
+            spinner[1],
+            spinner[2],
+            red,
+            green,
+            blue,
+            std::array<float, 3>{1.0F, 1.0F, 1.0F},
+            std::array<float, 3>{2.0F, 2.0F, 2.0F}
+        );
     }
 
     struct AppState {
