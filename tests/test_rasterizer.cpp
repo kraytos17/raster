@@ -15,7 +15,6 @@
 #endif
 
 namespace {
-
     // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
     TEST_CASE("fragment callback contract is enforced at compile time", "[rasterizer][concept]") {
         const auto valid_fragment =
@@ -140,7 +139,6 @@ namespace {
     }
 
     namespace {
-
         struct CoverageCounters {
             std::vector<std::uint32_t> counts;
             std::vector<std::uint32_t> owner;
@@ -170,7 +168,6 @@ namespace {
                 ++covered_pixels;
             }
         };
-
     } // namespace
 
     // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
@@ -601,7 +598,6 @@ namespace {
             return count == 0U;
         }));
     }
-
 } // namespace
 
 #if defined(__clang__)

@@ -10,7 +10,6 @@
 #endif
 
 namespace {
-
     // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions)
     TEST_CASE("framebuffer storage is cache-line aligned", "[framebuffer][memory]") {
         const raster::Framebuffer framebuffer{16, 8};
@@ -96,7 +95,6 @@ namespace {
         REQUIRE(framebuffer.color_view()[16, 16] == 0xFFAABBCCU);
         REQUIRE(framebuffer.depth_view()[16, 16] == 0.5F);
     }
-
 } // namespace
 
 #if defined(__clang__)

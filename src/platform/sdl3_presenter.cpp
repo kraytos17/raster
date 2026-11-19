@@ -3,11 +3,8 @@
 #include <limits>
 
 namespace raster {
-
     std::expected<void, PresenterError> WindowPresenter::initialize(
-        int width,
-        int height,
-        Framebuffer& framebuffer
+        int width, int height, Framebuffer& framebuffer
     ) noexcept {
         if (width <= 0 || height <= 0) {
             return std::unexpected{PresenterError::InvalidPixelSize};
@@ -112,8 +109,7 @@ namespace raster {
     }
 
     std::expected<void, PresenterError> WindowPresenter::recreate_texture(
-        std::size_t width,
-        std::size_t height
+        std::size_t width, std::size_t height
     ) noexcept {
         if (!renderer_
             || width

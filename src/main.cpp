@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <numbers>
 #include <print>
@@ -12,15 +13,18 @@
 #include <SDL3/SDL_main.h>
 #include <tuple>
 
+#include "raster/io/obj_loader.hpp"
+#include "raster/io/tga_loader.hpp"
 #include "raster/math/mat.hpp"
 #include "raster/math/vec.hpp"
 #include "raster/memory/framebuffer.hpp"
+#include "raster/memory/soa_mesh.hpp"
+#include "raster/pipeline/clipper.hpp"
 #include "raster/pipeline/rasterizer.hpp"
 #include "raster/pipeline/shader.hpp"
 #include "raster/platform/sdl3_presenter.hpp"
 
 namespace {
-
     constexpr std::size_t initial_width = 960;
     constexpr std::size_t initial_height = 540;
 
@@ -104,7 +108,7 @@ namespace {
             raster::Vec2f uv{};
 
             [[nodiscard]]
-            constexpr auto attributes(this const Varyings& self) noexcept {
+            constexpr auto attributes(this auto&& self) noexcept {
                 return std::tie(self.uv);
             }
         };
@@ -138,25 +142,10 @@ namespace {
     void draw_floor_triangle(
         raster::Framebuffer& framebuffer,
         FloorShader& shader,
-        const raster::Vec3f& world_a,
-        const raster::Vec3f& world_b,
-        const raster::Vec3f& world_c,
-        const raster::Vec2f& uv_a,
-        const raster::Vec2f& uv_b,
-        const raster::Vec2f& uv_c
+        const FloorShader::Varyings& varying_a,
+        const FloorShader::Varyings& varying_b,
+        const FloorShader::Varyings& varying_c
     ) noexcept {
-        const auto varying_a = shader.vertex(world_a, uv_a);
-        const auto varying_b = shader.vertex(world_b, uv_b);
-        const auto varying_c = shader.vertex(world_c, uv_c);
-        if (varying_a.clip_pos.w
-            <= 0.0F
-            || varying_b.clip_pos.w
-            <= 0.0F
-            || varying_c.clip_pos.w
-            <= 0.0F) {
-            return;
-        }
-
         const std::array<float, 3> inv_w{
             1.0F / varying_a.clip_pos.w,
             1.0F / varying_b.clip_pos.w,
@@ -218,11 +207,46 @@ namespace {
         );
     }
 
-    void render_scene(raster::Framebuffer& framebuffer, std::uint64_t elapsed_ns) noexcept {
+    [[nodiscard]]
+    SDL_AppResult draw_mesh(
+        raster::Framebuffer& framebuffer, FloorShader& shader, const raster::SoAMesh& mesh
+    ) noexcept {
+        for (const auto triangle_index : std::views::iota(std::size_t{0}, mesh.triangle_count())) {
+            const auto index_base = triangle_index * 3;
+            const auto vertex_a = static_cast<std::size_t>(mesh.indices[index_base]);
+            const auto vertex_b = static_cast<std::size_t>(mesh.indices[index_base + 1]);
+            const auto vertex_c = static_cast<std::size_t>(mesh.indices[index_base + 2]);
+            const auto varying_a = shader.vertex(mesh.positions[vertex_a], mesh.uvs[vertex_a]);
+            const auto varying_b = shader.vertex(mesh.positions[vertex_b], mesh.uvs[vertex_b]);
+            const auto varying_c = shader.vertex(mesh.positions[vertex_c], mesh.uvs[vertex_c]);
+
+            auto clipped = raster::clip_triangle(shader, varying_a, varying_b, varying_c);
+            if (!clipped) {
+                // Malformed/non-finite geometry is reported to the caller;
+                // the noexcept frame path never performs formatted I/O.
+                return SDL_APP_FAILURE;
+            }
+
+            for (const auto& subtriangle : std::span{clipped->triangles.data(), clipped->size}) {
+                draw_floor_triangle(
+                    framebuffer,
+                    shader,
+                    subtriangle.vertices[0],
+                    subtriangle.vertices[1],
+                    subtriangle.vertices[2]
+                );
+            }
+        }
+        return SDL_APP_CONTINUE;
+    }
+
+    SDL_AppResult render_scene(
+        raster::Framebuffer& framebuffer, const raster::SoAMesh& mesh, std::uint64_t elapsed_ns
+    ) noexcept {
         const auto width = framebuffer.width;
         const auto height = framebuffer.height;
         if (width < 2 || height < 2) {
-            return;
+            return SDL_APP_CONTINUE;
         }
 
         std::ranges::fill(framebuffer.color_storage, 0xFF101018U);
@@ -249,45 +273,8 @@ namespace {
 
         FloorShader shader{};
         shader.uniforms.model_view_proj = projection * view;
-        constexpr float floor_y = 0.0F;
-        for (const auto row : std::views::iota(std::size_t{0}, std::size_t{999})) {
-            const auto z_near = 0.1F + static_cast<float>(row);
-            const auto z_far = row == 998 ? 1000.0F : z_near + 1.0F;
-            for (const auto column : std::views::iota(std::size_t{0}, std::size_t{8})) {
-                const auto x_left = -4.0F + static_cast<float>(column);
-                const auto x_right = x_left + 1.0F;
-                // Horizontal floor at y=0, extending away from the RH
-                // camera along view -Z. The camera points down slightly so
-                // all 0.1..1000 rows remain in front of the near plane.
-                const raster::Vec3f near_left{.x = x_left, .y = floor_y, .z = -z_near};
-                const raster::Vec3f near_right{.x = x_right, .y = floor_y, .z = -z_near};
-                const raster::Vec3f far_right{.x = x_right, .y = floor_y, .z = -z_far};
-                const raster::Vec3f far_left{.x = x_left, .y = floor_y, .z = -z_far};
-                const raster::Vec2f uv_near_left{.x = x_left * 0.5F, .y = z_near * 0.5F};
-                const raster::Vec2f uv_near_right{.x = x_right * 0.5F, .y = z_near * 0.5F};
-                const raster::Vec2f uv_far_right{.x = x_right * 0.5F, .y = z_far * 0.5F};
-                const raster::Vec2f uv_far_left{.x = x_left * 0.5F, .y = z_far * 0.5F};
-                draw_floor_triangle(
-                    framebuffer,
-                    shader,
-                    near_left,
-                    far_right,
-                    near_right,
-                    uv_near_left,
-                    uv_far_right,
-                    uv_near_right
-                );
-                draw_floor_triangle(
-                    framebuffer,
-                    shader,
-                    near_left,
-                    far_left,
-                    far_right,
-                    uv_near_left,
-                    uv_far_left,
-                    uv_far_right
-                );
-            }
+        if (auto result = draw_mesh(framebuffer, shader, mesh); result != SDL_APP_CONTINUE) {
+            return result;
         }
 
         // One spinning RGB overlay on top to keep the scene animated. Its
@@ -321,10 +308,13 @@ namespace {
             std::array<float, 3>{1.0F, 1.0F, 1.0F},
             std::array<float, 3>{2.0F, 2.0F, 2.0F}
         );
+        return SDL_APP_CONTINUE;
     }
 
     struct AppState {
         raster::Framebuffer framebuffer{initial_width, initial_height};
+        raster::SoAMesh mesh{};
+        raster::TgaImage checker_texture{};
         raster::WindowPresenter presenter;
         std::uint64_t frame_count{};
         std::uint64_t report_start_ns{};
@@ -353,6 +343,22 @@ SDL_AppResult SDLCALL SDL_AppInit(void** appstate, int, char*[]) {
         }
 
         const auto now = SDL_GetTicksNS();
+        const auto asset_directory = std::filesystem::path{RASTER_ASSET_DIR};
+        auto mesh = raster::load_obj(asset_directory / "models/raster_milestone.obj");
+        if (!mesh) {
+            std::println(stderr, "raster: OBJ load failed ({})", static_cast<int>(mesh.error()));
+            return SDL_APP_FAILURE;
+        }
+        state->mesh = std::move(*mesh);
+
+        auto checker =
+            raster::load_tga(std::filesystem::path{RASTER_ASSET_DIR} / "textures/checker.tga");
+        if (!checker) {
+            std::println(stderr, "raster: TGA load failed ({})", static_cast<int>(checker.error()));
+            return SDL_APP_FAILURE;
+        }
+        state->checker_texture = std::move(*checker);
+
         state->report_start_ns = now;
         state->animation_start_ns = now;
         state->auto_resize_test =
@@ -451,7 +457,11 @@ SDL_AppResult SDLCALL SDL_AppIterate(void* appstate) {
     }
 
     const auto now = SDL_GetTicksNS();
-    render_scene(state.framebuffer, now - state.animation_start_ns);
+    const auto render_result =
+        render_scene(state.framebuffer, state.mesh, now - state.animation_start_ns);
+    if (render_result != SDL_APP_CONTINUE) {
+        return render_result;
+    }
     if (auto result = state.presenter.present(state.framebuffer); !result) {
         std::println(stderr, "raster: presentation failed ({})", static_cast<int>(result.error()));
         return SDL_APP_FAILURE;

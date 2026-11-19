@@ -9,7 +9,6 @@
 #include "raster/math/vec.hpp"
 
 namespace raster {
-
     // Column-major 4x4 matrix: columns[i] holds column i, so element (row, col)
     // is columns[col][row].
     struct Mat4f {
@@ -111,10 +110,7 @@ namespace raster {
     // constexpr caller. Invalid parameters return identity instead of throwing.
     [[nodiscard]]
     constexpr Mat4f perspective_reverse_z_from_focal4f(
-        float focal,
-        float aspect,
-        float z_near,
-        float z_far
+        float focal, float aspect, float z_near, float z_far
     ) noexcept {
         if (!(z_far > z_near) || !(z_near > 0.0F) || !(aspect > 0.0F) || !(focal > 0.0F)) {
             return identity4f();
@@ -136,10 +132,7 @@ namespace raster {
     // the compile-time reverse-Z invariants use the arithmetic-only focal form.
     [[nodiscard]]
     inline Mat4f perspective_reverse_z4f(
-        float fov_y,
-        float aspect,
-        float z_near,
-        float z_far
+        float fov_y, float aspect, float z_near, float z_far
     ) noexcept {
         if (!(fov_y > 0.0F) || !(fov_y < std::numbers::pi_v<float>)) {
             return identity4f();

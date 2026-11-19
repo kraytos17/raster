@@ -1,54 +1,70 @@
 # raster
 
-`raster` is a dependency-light C++23 software rasterizer project. It is built incrementally,
-starting with a contiguous cache-line-aligned framebuffer and an SDL3 callback application.
+A C++23 CPU software rasterizer. Uses SDL3's callback lifecycle for windowing and presentation; everything else—transforms, homogeneous clipping, depth buffering, and shading—runs on the CPU.
+
+## Features
+
+- **Watertight 28.4 fixed-point rasterization:** 64-bit edge equations, top-left fill rule, 2×2 quad traversal, and separate coverage/interpolation barycentrics.
+- **Reverse-Z 3D pipeline:** Right-handed transforms, reverse-Z depth (`1.0` near, `0.0` far, `>` depth test), cached `1/w`, and perspective-correct varying interpolation.
+- **Homogeneous clipping:** Stack-allocated, fixed-capacity 6-plane Sutherland–Hodgman clipping and fan triangulation prior to perspective divide.
+- **Zero-overhead shaders:** Static dispatch via C++23 concepts (no RTTI or virtual calls).
+- **Asset loading:** Bounds-checked OBJ parser (`std::expected`, `std::generator`, `std::from_chars`, `std::flat_map`) and TGA type-2 (24/32-bit) loader using byte spans, `std::bit_cast`, and `std::byteswap`.
+- **Memory layout:** 64-byte-aligned flat color/depth buffers exposed via `std::mdspan` views.
 
 ## Requirements
 
-- GCC 14.2+ or Clang 18.1+ with support for the C++23 features used by the current milestone
-- CMake 3.28 or newer
-- Ninja (for the supplied presets)
-- SDL3
-- Internet access on the first configure if Catch2 v3 is not installed system-wide
-- Optional developer tools: ccache/sccache, mold/lld, clang-format, cppcheck
+- **Build:** CMake 3.28+, Ninja
+- **Compiler:** GCC 14.2+ or Clang 18.1+ with C++23 stdlib support (`mdspan`, `expected`, `generator`, `flat_map`, `print`). Tested on GCC 16.2 and Clang 23.1.
+- **Dependencies:** SDL3 (CMake config package). Catch2 3.16.1 is fetched automatically via `FetchContent` if not installed locally.
+- **Optional:** `just`, `clang-format`, `clang-tidy`, `cppcheck`, `ccache`/`sccache`, `mold`/`lld`.
 
-## Build and run
+## Building & Running
+
+Configure, build, and run tests using CMake workflow presets:
 
 ```sh
 cmake --workflow --preset debug-sanitized
 ./build/debug-sanitized/raster
 ```
 
-The required build profiles are `debug-sanitized`, `release-native`, and `profile-telemetry`.
-Also available: `tidy` and `analyze`. List them with `cmake --list-presets`.
+### Presets
 
-Run the same configure, build, and test loop with `just workflow`. Choose another profile with
-`just preset=release-native workflow` or `RASTER_PRESET=tidy just workflow`.
+| Preset | Compiler | Configuration |
+| --- | --- | --- |
+| `debug-sanitized` | GCC | Debug + ASan & UBSan |
+| `release-native` | GCC | Release + `-march=native` + LTO |
+| `profile-telemetry` | Clang | RelWithDebInfo + `-march=native` + LTO + frame pointers |
+| `tidy` | Clang | Debug + `clang-tidy` during build |
+| `analyze` | GCC | Debug + `-fanalyzer` |
 
-The `Justfile` provides shortcuts for build, test, run, lint, install, and cleanup. `just verify`
-runs the local quality gate. Copy `.env.example` to `.env` to set local defaults.
-Common commands: `just build`, `just test`, `just run`, `just lint`, `just doctor`, and
-`just presets`. Override the build profile with `just preset=release-native build`.
+### `just` Recipes
 
-## C++ tooling
+A `Justfile` wraps `CMakePresets.json` for common tasks:
 
-The repository includes `.clang-format`, `.clang-tidy`, `.clangd`, and `.editorconfig` settings.
-With the optional tools installed, use `just format`, `just check-format`, `just cppcheck`, or
-`just lint`. Configure with `--preset tidy` to run clang-tidy as part
-of compilation. Run `scripts/hooks-install.sh` to opt in to the staged C++ formatting hook.
+```sh
+just                                      # list all recipes
+just doctor                               # verify toolchain and SDL3
+just preset=release-native build          # build a specific preset
+just preset=debug-sanitized test          # run Catch2 test suite
+just preset=debug-sanitized resize-gate   # headless SDL resize/minimize test under ASan
+just verify                               # format check, cppcheck, clang-tidy, sanitized tests
+just run                                  # build and run
+```
 
-The SDL3 callback application displays the current software-rendered scene in a resizable,
-high-DPI window. The 64-byte-aligned framebuffer supports depth storage and tile-local clearing.
+Override defaults locally by setting `RASTER_PRESET` / `RASTER_JOBS` or copying `.env.example` to `.env`. An opt-in pre-commit format hook is available via `just hooks-install`.
 
-The current renderer implements the first three milestones: a watertight 28.4 fixed-point
-2x2-quad triangle rasterizer; constexpr vector/matrix arithmetic with portable compile-time
-reverse-Z projection checks; and a reverse-Z perspective-correct checkerboard floor. Runtime
-norms, camera rotations, field-of-view conversion, and checker indexing use `std::` math.
-The constexpr reverse-Z projection constructor accepts the already-computed focal scale so its
-near/far depth invariant can be checked during constant evaluation without requiring constexpr
-`std::tan` on every supported C++23 compiler. Shader interpolation is constrained by
-`ShaderProgram` and implemented by the `ShaderBase` tuple mixin.
+## Roadmap
 
-Run the automated framebuffer resize/minimize/restore gate with
-`just preset=debug-sanitized resize-gate`; it uses SDL3's dummy video driver and exercises the
-real callback lifecycle under ASan/UBSan.
+- [x] **M1 — Framebuffer & SDL3 shell:** Callback lifecycle, HiDPI resize/minimize handling, aligned `mdspan` buffers.
+- [x] **M2 — Fixed-point rasterizer:** 28.4 coordinates, top-left rule, 2×2 quads, seam/coverage tests.
+- [x] **M3 — 3D & perspective interpolation:** Reverse-Z depth, shader concepts, procedural checker scene.
+- [ ] **M4 — Clipping & asset loaders** *(in progress)*: 6-plane clipping and OBJ/TGA loaders are implemented; remaining work is guard-band clipping comparison and high-poly free-look stress testing under UBSan/ASan.
+- [ ] **M5 — Textures & mipmapping:** Custom `std::mdspan` layouts (Morton vs. 4×4 tiled vs. row-major), mip pyramids, and 2×2 quad UV derivatives for LOD selection.
+- [ ] **M6 — Multithreaded tile engine:** 16×16 tile binning, `std::jthread` work-stealing, per-thread transient arenas, zero-allocation frame verification, and TSan validation.
+
+### Future Ideas
+
+- 256-bit SIMD quad evaluation (2 quads / 8 pixels per vector)
+- Hierarchical-Z per-tile rejection
+- Shadow mapping, Cook–Torrance GGX PBR, or tiled deferred shading
+- Terminal presenter (UTF-8 half-blocks + 24-bit TrueColor)

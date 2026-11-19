@@ -58,7 +58,11 @@ target_sources(raster_engine INTERFACE
         include/raster/math/barycentric.hpp
         include/raster/math/mat.hpp
         include/raster/math/vec.hpp
+        include/raster/io/obj_loader.hpp
+        include/raster/io/tga_loader.hpp
         include/raster/memory/framebuffer.hpp
+        include/raster/memory/soa_mesh.hpp
+        include/raster/pipeline/clipper.hpp
         include/raster/pipeline/rasterizer.hpp
         include/raster/pipeline/shader.hpp
         include/raster/platform/sdl3_presenter.hpp
@@ -77,6 +81,7 @@ add_executable(raster
     src/platform/sdl3_presenter.cpp
 )
 target_link_libraries(raster PRIVATE raster::engine)
+target_compile_definitions(raster PRIVATE RASTER_ASSET_DIR="${PROJECT_SOURCE_DIR}/assets")
 raster_apply_optimization(raster)
 raster_apply_sanitizers(raster)
 raster_apply_static_analysis(raster)
@@ -101,10 +106,13 @@ if(RASTER_BUILD_TESTS)
 
     add_executable(raster_tests
         tests/test_framebuffer.cpp
+        tests/test_clipper.cpp
         tests/test_math.cpp
+        tests/test_asset_loaders.cpp
         tests/test_rasterizer.cpp
         tests/test_shader.cpp
     )
+    target_compile_definitions(raster_tests PRIVATE RASTER_ASSET_DIR="${PROJECT_SOURCE_DIR}/assets")
 
     target_link_libraries(raster_tests PRIVATE raster::engine Catch2::Catch2WithMain)
     raster_apply_optimization(raster_tests)

@@ -17,14 +17,13 @@
 #endif
 
 namespace {
-
     struct UvTestShader final : raster::ShaderBase {
         struct Varyings {
             raster::Vec4f clip_pos{};
             raster::Vec2f uv{};
 
             [[nodiscard]]
-            constexpr auto attributes(this const Varyings& self) noexcept {
+            constexpr auto attributes(this auto&& self) noexcept {
                 return std::tie(self.uv);
             }
         };
@@ -39,8 +38,7 @@ namespace {
 
     // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
     TEST_CASE(
-        "vector arithmetic is constexpr and vector norms use runtime std math",
-        "[math][vec]"
+        "vector arithmetic is constexpr and vector norms use runtime std math", "[math][vec]"
     ) {
         STATIC_REQUIRE(sizeof(raster::Vec4f) == 16);
         STATIC_REQUIRE(alignof(raster::Vec4f) == 16);
@@ -136,8 +134,7 @@ namespace {
 
     // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
     TEST_CASE(
-        "reverse-z focal projection maps near to 1 and far to 0 at compile time",
-        "[math][mat]"
+        "reverse-z focal projection maps near to 1 and far to 0 at compile time", "[math][mat]"
     ) {
         // n=1, f=2 makes every depth-row entry an exact binary float, so the
         // boundary mapping is exact under round-to-nearest.
@@ -417,7 +414,6 @@ namespace {
         REQUIRE(depths[target_y * width + target_x] > 0.0F);
         REQUIRE(depths[target_y * width + target_x] <= 1.0F);
     }
-
 } // namespace
 
 #if defined(__clang__)

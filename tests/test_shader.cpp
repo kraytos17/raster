@@ -10,7 +10,6 @@
 #endif
 
 namespace {
-
     // Minimal two-attribute shader used to verify the ShaderBase mixin and the
     // ShaderProgram concept.
     struct TestShader final : raster::ShaderBase {
@@ -20,7 +19,7 @@ namespace {
             raster::Vec3f world_position{};
 
             [[nodiscard]]
-            constexpr auto attributes(this const Varyings& self) noexcept {
+            constexpr auto attributes(this auto&& self) noexcept {
                 return std::tie(self.uv, self.world_position);
             }
         };
@@ -50,7 +49,7 @@ namespace {
             raster::Vec4f clip_pos{};
 
             [[nodiscard]]
-            constexpr auto attributes(this const Varyings& self) noexcept {
+            constexpr auto attributes(this auto&& self) noexcept {
                 return std::tie(self.clip_pos);
             }
         };
@@ -61,7 +60,7 @@ namespace {
             raster::Vec3f clip_pos{};
 
             [[nodiscard]]
-            constexpr auto attributes(this const Varyings& self) noexcept {
+            constexpr auto attributes(this auto&& self) noexcept {
                 return std::tie(self.clip_pos);
             }
         };
@@ -125,7 +124,6 @@ namespace {
         REQUIRE(color.w == 1.0F);
         REQUIRE(color.x == 0.85F); // floor(1.0) + floor(3.5) -> even cell
     }
-
 } // namespace
 
 #if defined(__clang__)

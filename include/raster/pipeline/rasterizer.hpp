@@ -13,7 +13,6 @@
 #include "raster/memory/framebuffer.hpp"
 
 namespace raster {
-
     // Why a triangle was rejected during screen-space setup.
     enum class SetupError {
         Backfacing,
@@ -50,12 +49,8 @@ namespace raster {
     // standard implicit argument conversions remain allowed (a fragment taking
     // narrower integer types or PixelBarycentrics by value still satisfies
     // this concept).
-    template <typename Fragment>
-    concept FragmentCallback = requires(
-        Fragment& fragment,
-        std::size_t x,
-        std::size_t y,
-        const PixelBarycentrics& barycentrics
+    template <typename Fragment> concept FragmentCallback = requires(
+        Fragment& fragment, std::size_t x, std::size_t y, const PixelBarycentrics& barycentrics
     ) {
         { std::invoke(fragment, x, y, barycentrics) } noexcept;
     };
@@ -80,7 +75,6 @@ namespace raster {
     };
 
     namespace detail {
-
         // Floor division that stays correct for negative dividends (a plain
         // shift or truncated division rounds toward zero).
         [[nodiscard]]
@@ -102,8 +96,7 @@ namespace raster {
 
         [[nodiscard]]
         constexpr bool covers_pixel(
-            const std::array<std::int64_t, 3>& edge,
-            const std::array<std::int64_t, 3>& bias
+            const std::array<std::int64_t, 3>& edge, const std::array<std::int64_t, 3>& bias
         ) noexcept {
             return (edge[0] + bias[0]) >= 0 && (edge[1] + bias[1]) >= 0 && (edge[2] + bias[2]) >= 0;
         }
@@ -178,9 +171,7 @@ namespace raster {
     // Plain screen-space triangle (screen-linear depth of 0, inv_w of 1).
     [[nodiscard]]
     inline std::expected<ScreenTriangle, SetupError> make_screen_triangle(
-        ScreenPoint a,
-        ScreenPoint b,
-        ScreenPoint c
+        ScreenPoint a, ScreenPoint b, ScreenPoint c
     ) noexcept {
         return make_screen_triangle(
             a,
@@ -194,10 +185,7 @@ namespace raster {
     // Maps NDC (-1..1, +Y up) to top-down pixel coordinates.
     [[nodiscard]]
     inline ScreenPoint viewport_to_screen(
-        float ndc_x,
-        float ndc_y,
-        std::size_t viewport_width,
-        std::size_t viewport_height
+        float ndc_x, float ndc_y, std::size_t viewport_width, std::size_t viewport_height
     ) noexcept {
         const auto width = static_cast<float>(viewport_width);
         const auto height = static_cast<float>(viewport_height);
@@ -208,8 +196,7 @@ namespace raster {
     // its bounding box and the viewport, walking aligned 2x2 pixel quads.
     // Coverage uses the biased edge values; the fragment callback receives
     // unbiased screen-space weights plus perspective-correct weights.
-    template <FragmentCallback Fragment>
-    void rasterize_triangle(
+    template <FragmentCallback Fragment> void rasterize_triangle(
         const ScreenTriangle& triangle,
         std::size_t viewport_width,
         std::size_t viewport_height,
@@ -230,8 +217,7 @@ namespace raster {
     // visibility mask — a fully occluded quad skips perspective recovery and
     // fragment shading entirely — and passing pixels write depth before
     // shading.
-    template <FragmentCallback Fragment>
-    void rasterize_triangle(
+    template <FragmentCallback Fragment> void rasterize_triangle(
         const ScreenTriangle& triangle,
         std::size_t viewport_width,
         std::size_t viewport_height,

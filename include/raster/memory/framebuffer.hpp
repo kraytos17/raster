@@ -12,7 +12,6 @@
 #include <vector>
 
 namespace raster {
-
     inline constexpr std::size_t cache_line_size = 64;
 
     template <typename T> class AlignedAllocator {
@@ -49,10 +48,8 @@ namespace raster {
             using other = AlignedAllocator<U>;
         };
 
-        template <typename U>
-        friend constexpr bool operator==(
-            const AlignedAllocator&,
-            const AlignedAllocator<U>&
+        template <typename U> friend constexpr bool operator==(
+            const AlignedAllocator&, const AlignedAllocator<U>&
         ) noexcept {
             return true;
         }
@@ -78,8 +75,7 @@ namespace raster {
             }
         }
 
-        template <typename Self>
-        [[nodiscard]]
+        template <typename Self> [[nodiscard]]
         auto color_view(this Self& self) noexcept {
             using Element = std::conditional_t<
                 std::is_const_v<std::remove_reference_t<Self>>,
@@ -90,8 +86,7 @@ namespace raster {
             return std::mdspan<Element, Extents2D>{data, self.height, self.width};
         }
 
-        template <typename Self>
-        [[nodiscard]]
+        template <typename Self> [[nodiscard]]
         auto depth_view(this Self& self) noexcept {
             using Element = std::
                 conditional_t<std::is_const_v<std::remove_reference_t<Self>>, const float, float>;

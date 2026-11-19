@@ -6,14 +6,12 @@
 #include <limits>
 
 namespace raster {
-
     // The float <-> 28.4 fixed-point hybrid in this header (and the exact
     // barycentric partition in pipeline/rasterizer.hpp) assumes that float is
     // exactly IEEE-754 binary32 with round-to-nearest-even and no excess
     // precision.
     static_assert(
-        std::numeric_limits<float>::is_iec559,
-        "raster requires an IEEE-754 binary32 float"
+        std::numeric_limits<float>::is_iec559, "raster requires an IEEE-754 binary32 float"
     );
     static_assert(
         std::numeric_limits<float>::digits == 24,
@@ -113,10 +111,7 @@ namespace raster {
     // directions, so exactly one of them qualifies as top/left.
     [[nodiscard]]
     constexpr bool is_top_or_left_edge(
-        std::int32_t ax,
-        std::int32_t ay,
-        std::int32_t bx,
-        std::int32_t by
+        std::int32_t ax, std::int32_t ay, std::int32_t bx, std::int32_t by
     ) noexcept {
         const std::int32_t edge_dx = bx - ax;
         const std::int32_t edge_dy = by - ay;
@@ -127,10 +122,7 @@ namespace raster {
     // exact-on-edge centers for top/left edges, -1 culls them otherwise.
     [[nodiscard]]
     constexpr std::int64_t edge_bias(
-        std::int32_t ax,
-        std::int32_t ay,
-        std::int32_t bx,
-        std::int32_t by
+        std::int32_t ax, std::int32_t ay, std::int32_t bx, std::int32_t by
     ) noexcept {
         return is_top_or_left_edge(ax, ay, bx, by) ? 0 : -1;
     }

@@ -3,7 +3,6 @@
 #include <cmath>
 
 namespace raster {
-
     struct Vec2f {
         float x{};
         float y{};
@@ -27,6 +26,35 @@ namespace raster {
         }
     };
 
+    [[nodiscard]]
+    constexpr float lerp(float a, float b, float t) noexcept {
+        return a + (b - a) * t;
+    }
+
+    [[nodiscard]]
+    constexpr Vec2f lerp(const Vec2f& a, const Vec2f& b, float t) noexcept {
+        return Vec2f{.x = lerp(a.x, b.x, t), .y = lerp(a.y, b.y, t)};
+    }
+
+    [[nodiscard]]
+    constexpr Vec3f lerp(const Vec3f& a, const Vec3f& b, float t) noexcept {
+        return Vec3f{
+            .x = lerp(a.x, b.x, t),
+            .y = lerp(a.y, b.y, t),
+            .z = lerp(a.z, b.z, t),
+        };
+    }
+
+    [[nodiscard]]
+    constexpr Vec4f lerp(const Vec4f& a, const Vec4f& b, float t) noexcept {
+        return Vec4f{
+            .x = lerp(a.x, b.x, t),
+            .y = lerp(a.y, b.y, t),
+            .z = lerp(a.z, b.z, t),
+            .w = lerp(a.w, b.w, t),
+        };
+    }
+
     // Component-wise ternary weighted sum a*w0 + b*w1 + c*w2 used by shader
     // attribute interpolation (weights are the per-pixel barycentrics).
     [[nodiscard]]
@@ -36,12 +64,7 @@ namespace raster {
 
     [[nodiscard]]
     constexpr Vec2f lerp3(
-        const Vec2f& a,
-        const Vec2f& b,
-        const Vec2f& c,
-        float w0,
-        float w1,
-        float w2
+        const Vec2f& a, const Vec2f& b, const Vec2f& c, float w0, float w1, float w2
     ) noexcept {
         return Vec2f{
             .x = lerp3(a.x, b.x, c.x, w0, w1, w2),
@@ -51,12 +74,7 @@ namespace raster {
 
     [[nodiscard]]
     constexpr Vec3f lerp3(
-        const Vec3f& a,
-        const Vec3f& b,
-        const Vec3f& c,
-        float w0,
-        float w1,
-        float w2
+        const Vec3f& a, const Vec3f& b, const Vec3f& c, float w0, float w1, float w2
     ) noexcept {
         return Vec3f{
             .x = lerp3(a.x, b.x, c.x, w0, w1, w2),
@@ -67,12 +85,7 @@ namespace raster {
 
     [[nodiscard]]
     constexpr Vec4f lerp3(
-        const Vec4f& a,
-        const Vec4f& b,
-        const Vec4f& c,
-        float w0,
-        float w1,
-        float w2
+        const Vec4f& a, const Vec4f& b, const Vec4f& c, float w0, float w1, float w2
     ) noexcept {
         return Vec4f{
             .x = lerp3(a.x, b.x, c.x, w0, w1, w2),

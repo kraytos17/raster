@@ -7,7 +7,6 @@
 #include "raster/memory/framebuffer.hpp"
 
 namespace raster {
-
     enum class PresenterError {
         VideoInitialization,
         WindowCreation,
@@ -74,9 +73,7 @@ namespace raster {
 
         [[nodiscard]]
         std::expected<void, PresenterError> initialize(
-            int width,
-            int height,
-            Framebuffer& framebuffer
+            int width, int height, Framebuffer& framebuffer
         ) noexcept;
 
         [[nodiscard]]
@@ -111,8 +108,7 @@ namespace raster {
 
         [[nodiscard]]
         std::expected<void, PresenterError> recreate_texture(
-            std::size_t width,
-            std::size_t height
+            std::size_t width, std::size_t height
         ) noexcept;
     };
 } // namespace raster
