@@ -78,6 +78,12 @@ run *args: (_build preset 'raster')
 resize-gate: (_build preset 'raster')
     RASTER_AUTO_RESIZE_TEST=1 SDL_VIDEODRIVER=dummy ./{{ build_dir }}/raster
 
+# Load the bundled high-poly OBJ and sweep a deterministic camera through it
+# while clipping/rasterizing each frame; fail on nonzero allocations in render.
+# Run with debug-sanitized to include UBSan/ASan coverage.
+clip-stress-gate: (_build preset 'raster')
+    RASTER_CLIP_STRESS_TEST=1 SDL_VIDEODRIVER=dummy ./{{ build_dir }}/raster
+
 # Reformat all project C++ files.
 format: (_build preset 'format')
 

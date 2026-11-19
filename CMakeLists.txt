@@ -66,6 +66,8 @@ target_sources(raster_engine INTERFACE
         include/raster/pipeline/rasterizer.hpp
         include/raster/pipeline/shader.hpp
         include/raster/platform/sdl3_presenter.hpp
+        include/raster/platform/allocation_probe.hpp
+        include/raster/render/scene_renderer.hpp
 )
 target_include_directories(raster_engine INTERFACE
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
@@ -78,7 +80,9 @@ target_compile_options(raster_engine INTERFACE
 
 add_executable(raster
     src/main.cpp
+    src/platform/allocation_probe.cpp
     src/platform/sdl3_presenter.cpp
+    src/render/scene_renderer.cpp
 )
 target_link_libraries(raster PRIVATE raster::engine)
 target_compile_definitions(raster PRIVATE RASTER_ASSET_DIR="${PROJECT_SOURCE_DIR}/assets")
