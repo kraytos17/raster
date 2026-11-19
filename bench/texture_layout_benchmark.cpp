@@ -1,21 +1,31 @@
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
+#include <filesystem>
 #include <mdspan>
 #include <print>
 #include <ranges>
 #include <SDL3/SDL.h>
+#include <stdexcept>
+#include <string_view>
 #include <vector>
 
+#include "raster/io/obj_loader.hpp"
+#include "raster/io/tga_loader.hpp"
+#include "raster/memory/framebuffer.hpp"
+#include "raster/memory/soa_mesh.hpp"
+#include "raster/memory/texture.hpp"
 #include "raster/memory/texture_layout.hpp"
+#include "raster/render/scene_renderer.hpp"
 
 namespace {
     using Extents = std::dextents<std::size_t, 2>;
-    constexpr std::size_t texture_width = 1024;
-    constexpr std::size_t texture_height = 1024;
+    constexpr std::size_t texture_width = 4096;
+    constexpr std::size_t texture_height = 4096;
     constexpr std::size_t quad_grid = texture_width / 2U;
-    constexpr std::size_t warmup_passes = 2;
+    constexpr std::size_t warmup_passes = 1;
     constexpr std::size_t measured_passes = 7;
     constexpr std::size_t quad_count = quad_grid * quad_grid;
 
@@ -119,9 +129,91 @@ namespace {
         );
         return ns_per_quad;
     }
+
+    template <typename Texture> [[nodiscard]]
+    double benchmark_render_scene(
+        const char* name,
+        const raster::SoAMesh& mesh,
+        const Texture& texture,
+        std::size_t width,
+        std::size_t height
+    ) {
+        raster::Framebuffer framebuffer{width, height};
+        constexpr std::size_t warmups = 1U;
+        constexpr std::size_t measured = 3U;
+        const auto render_once = [&] noexcept {
+            return raster::render::render_textured_model(framebuffer, mesh, texture);
+        };
+        for ([[maybe_unused]]
+             const auto pass : std::views::iota(std::size_t{0}, warmups)) {
+            if (!render_once()) {
+                throw std::runtime_error("scene benchmark warmup render failed");
+            }
+        }
+
+        std::array<std::uint64_t, measured> times{};
+        for (std::size_t pass = 0; pass < warmups + measured; ++pass) {
+            const auto start = SDL_GetTicksNS();
+            if (!render_once()) {
+                throw std::runtime_error("scene benchmark render failed");
+            }
+
+            const auto elapsed = SDL_GetTicksNS() - start;
+            if (pass >= warmups) {
+                times[pass - warmups] = elapsed;
+            }
+        }
+
+        std::ranges::sort(times);
+        const auto median = times[times.size() / 2U];
+        std::println(
+            "{}: 4K texture + {} triangles at {}x{}, median {:.3f} ms/frame ({} runs)",
+            name,
+            mesh.triangle_count(),
+            width,
+            height,
+            static_cast<double>(median) / 1.0e6,
+            measured
+        );
+        return static_cast<double>(median);
+    }
+
+    template <typename Texture> [[nodiscard]]
+    double benchmark_scene_configuration(
+        const char* name,
+        const raster::SoAMesh& mesh,
+        const Texture& texture,
+        std::size_t width,
+        std::size_t height
+    ) {
+        constexpr std::size_t repeats = 1U;
+        std::array<double, repeats> times{};
+        for (auto& time : times) {
+            time = benchmark_render_scene(name, mesh, texture, width, height);
+        }
+
+        std::ranges::sort(times);
+        return times[times.size() / 2U];
+    }
+
+    [[nodiscard]]
+    raster::TgaImage make_checker_4k() {
+        raster::TgaImage image{};
+        image.width = texture_width;
+        image.height = texture_height;
+        image.pixels.resize(texture_width * texture_height);
+        constexpr std::size_t cell_size = 16U;
+        for (std::size_t y = 0; y < texture_height; ++y) {
+            for (std::size_t x = 0; x < texture_width; ++x) {
+                image.pixels[y * texture_width + x] =
+                    (((x / cell_size) + (y / cell_size)) & 1U) == 0U ? 0xFFFFFFFFU : 0xFF101010U;
+            }
+        }
+        return image;
+    }
 } // namespace
 
-int main() noexcept {
+int main(int argc, char* argv[]) noexcept {
     try {
         const Extents extents{texture_height, texture_width};
         const std::layout_right::mapping<Extents> row_major{extents};
@@ -129,33 +221,136 @@ int main() noexcept {
         const raster::LayoutMorton::mapping<Extents> morton{extents};
         const auto sequential_order = make_quad_order(false);
         const auto randomized_order = make_quad_order(true);
+        const auto first_argument = argc > 1 ? std::string_view{argv[1]} : std::string_view{};
+        const auto selected_mode =
+            first_argument == "scene" ? first_argument : std::string_view{"fetch"};
+
+        const auto layout_argument_index = selected_mode == "scene" ? 2 : 1;
+        const auto order_argument_index = layout_argument_index + 1;
+        const auto selected_layout = argc > layout_argument_index
+            ? std::string_view{argv[layout_argument_index]}
+            : std::string_view{};
+        const auto selected_order = argc > order_argument_index
+            ? std::string_view{argv[order_argument_index]}
+            : std::string_view{};
+        if (selected_mode == "scene") {
+            const auto mesh_result = raster::load_obj(
+                std::filesystem::path{RASTER_ASSET_DIR} / "models/clipping_sphere.obj"
+            );
+            if (!mesh_result) {
+                throw std::runtime_error("could not load bundled clipping sphere OBJ");
+            }
+
+            auto checker_image = make_checker_4k();
+            const raster::Texture2D<std::layout_right> row_major_texture{checker_image};
+            const raster::Texture2D<raster::LayoutTiled4x4> tiled_texture{checker_image};
+            const raster::Texture2D<raster::LayoutMorton> morton_texture{checker_image};
+            constexpr std::size_t viewport_width = 640U;
+            constexpr std::size_t viewport_height = 480U;
+
+            double row_major_time = 0.0;
+            double tiled_time = 0.0;
+            double morton_time = 0.0;
+            if (selected_layout.empty() || selected_layout == "row-major") {
+                row_major_time = benchmark_scene_configuration(
+                    "layout_right scene",
+                    *mesh_result,
+                    row_major_texture,
+                    viewport_width,
+                    viewport_height
+                );
+            }
+            if (selected_layout.empty() || selected_layout == "tiled4x4") {
+                tiled_time = benchmark_scene_configuration(
+                    "tiled4x4 scene",
+                    *mesh_result,
+                    tiled_texture,
+                    viewport_width,
+                    viewport_height
+                );
+            }
+            if (selected_layout.empty() || selected_layout == "morton") {
+                morton_time = benchmark_scene_configuration(
+                    "Morton scene",
+                    *mesh_result,
+                    morton_texture,
+                    viewport_width,
+                    viewport_height
+                );
+            }
+            if (selected_layout.empty()) {
+                std::println(
+                    "scene relative to layout_right: tiled {:.2f}x, Morton {:.2f}x",
+                    row_major_time / tiled_time,
+                    row_major_time / morton_time
+                );
+            }
+            return 0;
+        }
+        if (selected_mode != "fetch") {
+            report_failure("mode must be fetch or scene");
+            return 2;
+        }
+        if ((!selected_order.empty()
+             && selected_order
+             != "sequential"
+             && selected_order
+             != "shuffled")
+            || (!selected_layout.empty()
+                && selected_layout
+                != "row-major"
+                && selected_layout
+                != "tiled4x4"
+                && selected_layout
+                != "morton")) {
+            report_failure(
+                "usage: raster_texture_benchmark [scene] [row-major|tiled4x4|morton] [sequential|shuffled]"
+            );
+            return 2;
+        }
+
+        constexpr std::size_t texture_bytes =
+            texture_width * texture_height * sizeof(std::uint32_t);
         std::println(
-            "{}x{} texture; {} warmups, {} measured full quad passes (median)",
+            "mode={}, {}x{} RGBA texture ({} MiB), {} warmups, {} measured passes; SDL_GetTicksNS median",
+            selected_mode,
             texture_width,
             texture_height,
+            texture_bytes / (std::size_t{1024} * std::size_t{1024}),
             warmup_passes,
             measured_passes
         );
 
-        const auto row_major_ns =
-            benchmark_layout("layout_right sequential", row_major, sequential_order);
-        const auto tiled_ns = benchmark_layout("tiled4x4 sequential", tiled, sequential_order);
-        const auto morton_ns = benchmark_layout("morton sequential", morton, sequential_order);
-        const auto row_major_random_ns =
-            benchmark_layout("layout_right shuffled", row_major, randomized_order);
-
-        const auto tiled_random_ns = benchmark_layout("tiled4x4 shuffled", tiled, randomized_order);
-        const auto morton_random_ns = benchmark_layout("morton shuffled", morton, randomized_order);
-        std::println(
-            "sequential relative to layout_right: tiled {:.2f}x, Morton {:.2f}x",
-            row_major_ns / tiled_ns,
-            row_major_ns / morton_ns
-        );
-        std::println(
-            "shuffled relative to layout_right: tiled {:.2f}x, Morton {:.2f}x",
-            row_major_random_ns / tiled_random_ns,
-            row_major_random_ns / morton_random_ns
-        );
+        const bool use_sequential = selected_order.empty() || selected_order == "sequential";
+        const bool use_shuffled = selected_order.empty() || selected_order == "shuffled";
+        if (selected_layout.empty() || selected_layout == "row-major") {
+            if (use_sequential) {
+                static_cast<void>(
+                    benchmark_layout("layout_right sequential", row_major, sequential_order)
+                );
+            }
+            if (use_shuffled) {
+                static_cast<void>(
+                    benchmark_layout("layout_right shuffled", row_major, randomized_order)
+                );
+            }
+        }
+        if (selected_layout.empty() || selected_layout == "tiled4x4") {
+            if (use_sequential) {
+                static_cast<void>(benchmark_layout("tiled4x4 sequential", tiled, sequential_order));
+            }
+            if (use_shuffled) {
+                static_cast<void>(benchmark_layout("tiled4x4 shuffled", tiled, randomized_order));
+            }
+        }
+        if (selected_layout.empty() || selected_layout == "morton") {
+            if (use_sequential) {
+                static_cast<void>(benchmark_layout("morton sequential", morton, sequential_order));
+            }
+            if (use_shuffled) {
+                static_cast<void>(benchmark_layout("morton shuffled", morton, randomized_order));
+            }
+        }
     } catch (const std::exception& error) {
         report_failure(error.what());
         return 1;

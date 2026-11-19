@@ -1,10 +1,12 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <limits>
 
 #include "raster/math/vec.hpp"
 #include "raster/pipeline/shader.hpp"
@@ -106,6 +108,55 @@ namespace raster {
         inline float intersection_t(float distance_a, float distance_b) noexcept {
             return distance_a / (distance_a - distance_b);
         }
+
+        inline void snap_intersection_to_plane(
+            Vec4f& point, ClipPlane plane, float guard_band
+        ) noexcept {
+            switch (plane) {
+                case ClipPlane::Left:
+                    point.x = -guard_band * point.w;
+                    break;
+                case ClipPlane::Right:
+                    point.x = guard_band * point.w;
+                    break;
+                case ClipPlane::Bottom:
+                    point.y = -guard_band * point.w;
+                    break;
+                case ClipPlane::Top:
+                    point.y = guard_band * point.w;
+                    break;
+                case ClipPlane::Far:
+                    point.z = 0.0F;
+                    break;
+                case ClipPlane::Near:
+                    point.z = point.w;
+                    break;
+            }
+        }
+
+        [[nodiscard]]
+        inline bool snap_roundoff_to_interval(float& value, float lower, float upper) noexcept {
+            const auto scale = std::max({
+                std::fabs(value),
+                std::fabs(lower),
+                std::fabs(upper),
+                std::numeric_limits<float>::min(),
+            });
+
+            const auto tolerance = 4.0F * std::numeric_limits<float>::epsilon() * scale;
+            if (value < lower) {
+                if (lower - value > tolerance) {
+                    return false;
+                }
+                value = lower;
+            } else if (value > upper) {
+                if (value - upper > tolerance) {
+                    return false;
+                }
+                value = upper;
+            }
+            return true;
+        }
     } // namespace detail
 
     // Six-plane homogeneous Sutherland-Hodgman clipping. Every edge intersection
@@ -189,7 +240,10 @@ namespace raster {
                     if (!std::isfinite(t) || t < 0.0F || t > 1.0F) {
                         return std::unexpected{ClipError::InvalidIntersection};
                     }
-                    output.vertices[output.size++] = shader.interpolate_edge(*previous, current, t);
+
+                    auto intersection = shader.interpolate_edge(*previous, current, t);
+                    detail::snap_intersection_to_plane(intersection.clip_pos, plane, guard_band);
+                    output.vertices[output.size++] = intersection;
                 }
                 if (current_inside) {
                     if (output.size >= clip_polygon_capacity) {
@@ -211,6 +265,22 @@ namespace raster {
             if (!detail::finite(point) || point.w <= 0.0F) {
                 return std::unexpected{ClipError::InvalidSurvivorW};
             }
+
+            auto canonical_point = point;
+            if (!detail::snap_roundoff_to_interval(
+                    canonical_point.x,
+                    -guard_band * point.w,
+                    guard_band * point.w
+                )
+                || !detail::snap_roundoff_to_interval(
+                    canonical_point.y,
+                    -guard_band * point.w,
+                    guard_band * point.w
+                )
+                || !detail::snap_roundoff_to_interval(canonical_point.z, 0.0F, point.w)) {
+                return std::unexpected{ClipError::InvalidSurvivorW};
+            }
+            input.vertices[vertex_index].clip_pos = canonical_point;
         }
         if (input.size < 3) {
             return fan;

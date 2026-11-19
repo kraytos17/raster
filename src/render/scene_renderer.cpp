@@ -39,10 +39,11 @@ namespace raster::render {
             return 0xFF000000U | (red << 16U) | (green << 8U) | blue;
         }
 
-        struct FloorShader final : ShaderBase {
+        template <typename Layout> struct FloorShader final : ShaderBase {
             struct Uniforms {
                 Mat4f model_view_projection{};
-                const Texture2D<LayoutTiled4x4>* texture{};
+                const Texture2D<Layout>* texture{};
+                bool solid_color_debug{};
             };
 
             Uniforms uniforms{};
@@ -74,7 +75,8 @@ namespace raster::render {
 
             [[nodiscard]]
             constexpr Vec4f fragment(const Varyings& varying) const noexcept {
-                const auto texel = uniforms.texture == nullptr
+                const auto texel = uniforms.solid_color_debug ? 0xFFB0B0B0U
+                    : uniforms.texture == nullptr
                     ? ((static_cast<int>(std::floor(varying.uv.x))
                         + static_cast<int>(std::floor(varying.uv.y)))
                                % 2
@@ -92,7 +94,7 @@ namespace raster::render {
             }
         };
 
-        static_assert(ShaderProgram<FloorShader>);
+        static_assert(ShaderProgram<FloorShader<LayoutTiled4x4>>);
 
         void draw_overlay_triangle(
             Framebuffer& framebuffer,
@@ -146,12 +148,12 @@ namespace raster::render {
             );
         }
 
-        void draw_mesh_triangle(
+        template <typename Layout> void draw_mesh_triangle(
             Framebuffer& framebuffer,
-            FloorShader& shader,
-            const FloorShader::Varyings& varying_a,
-            const FloorShader::Varyings& varying_b,
-            const FloorShader::Varyings& varying_c
+            FloorShader<Layout>& shader,
+            const typename FloorShader<Layout>::Varyings& varying_a,
+            const typename FloorShader<Layout>::Varyings& varying_b,
+            const typename FloorShader<Layout>::Varyings& varying_c
         ) noexcept {
             const std::array<float, 3> inverse_w{
                 1.0F / varying_a.clip_pos.w,
@@ -222,7 +224,7 @@ namespace raster::render {
                     const auto x = quad_x + (lane & 1U);
                     const auto y = quad_y + (lane >> 1U);
                     const auto shaded = shader.fragment(
-                        FloorShader::Varyings{
+                        typename FloorShader<Layout>::Varyings{
                             .clip_pos = varying_a.clip_pos,
                             .uv = quad_uv[lane],
                             .mip_lod = lod,
@@ -234,9 +236,12 @@ namespace raster::render {
             );
         }
 
-        [[nodiscard]]
+        template <typename Layout> [[nodiscard]]
         bool draw_mesh(
-            Framebuffer& framebuffer, FloorShader& shader, const SoAMesh& mesh, bool guard_band_test
+            Framebuffer& framebuffer,
+            FloorShader<Layout>& shader,
+            const SoAMesh& mesh,
+            bool guard_band_test
         ) noexcept {
             for (const auto triangle_index :
                  std::views::iota(std::size_t{0}, mesh.triangle_count())) {
@@ -267,15 +272,18 @@ namespace raster::render {
         }
     } // namespace
 
-    bool render_scene(
+    template <typename Layout> [[nodiscard]]
+    bool render_scene_impl(
         Framebuffer& framebuffer,
         const SoAMesh& mesh,
         std::uint64_t elapsed_ns,
         bool clip_stress_test,
         bool free_look_test,
         bool guard_band_test,
-        const Texture2D<LayoutTiled4x4>& texture,
-        const FreeLookCamera& camera
+        bool solid_color_debug,
+        const Texture2D<Layout>& texture,
+        const FreeLookCamera& camera,
+        bool draw_overlay
     ) noexcept {
         const auto width = framebuffer.width;
         const auto height = framebuffer.height;
@@ -309,7 +317,10 @@ namespace raster::render {
                     .y = std::sin(camera.pitch),
                     .z = -std::cos(camera.yaw) * cosine_pitch,
                 };
-                return look_at4f(eye, eye + direction, Vec3f{.x = 0.0F, .y = 1.0F, .z = 0.0F});
+                const auto camera_up = std::fabs(direction.y) > 0.99F
+                    ? Vec3f{.x = 0.0F, .y = 0.0F, .z = 1.0F}
+                    : Vec3f{.x = 0.0F, .y = 1.0F, .z = 0.0F};
+                return look_at4f(eye, eye + direction, camera_up);
             }
             return look_at4f(
                 eye,
@@ -324,17 +335,21 @@ namespace raster::render {
         const auto projection = perspective_reverse_z4f(
             1.2566371F,
             static_cast<float>(width) / static_cast<float>(height),
-            clip_stress_test || free_look_test ? 0.05F : 0.1F,
-            clip_stress_test || free_look_test ? 10.0F : 1000.0F
+            clip_stress_test || free_look_test ? 0.005F : 0.1F,
+            // Keep the free-look far plane well beyond the sphere: reverse-Z
+            // maps the far boundary to exactly zero, equal to the depth clear,
+            // so a surface at that boundary would fail the strict `>` test.
+            clip_stress_test ? 10.0F : 100.0F
         );
 
-        FloorShader shader{};
+        FloorShader<Layout> shader{};
         shader.uniforms.model_view_projection = projection * view;
         shader.uniforms.texture = &texture;
+        shader.uniforms.solid_color_debug = solid_color_debug;
         if (!draw_mesh(framebuffer, shader, mesh, guard_band_test)) {
             return false;
         }
-        if (clip_stress_test || free_look_test) {
+        if (!draw_overlay || clip_stress_test || free_look_test) {
             return true;
         }
 
@@ -357,5 +372,96 @@ namespace raster::render {
 
         draw_overlay_triangle(framebuffer, spinner[0], spinner[1], spinner[2], red, green, blue);
         return true;
+    }
+
+    bool render_scene(
+        Framebuffer& framebuffer,
+        const SoAMesh& mesh,
+        std::uint64_t elapsed_ns,
+        bool clip_stress_test,
+        bool free_look_test,
+        bool guard_band_test,
+        bool solid_color_debug,
+        const Texture2D<LayoutTiled4x4>& texture,
+        const FreeLookCamera& camera
+    ) noexcept {
+        return render_scene_impl(
+            framebuffer,
+            mesh,
+            elapsed_ns,
+            clip_stress_test,
+            free_look_test,
+            guard_band_test,
+            solid_color_debug,
+            texture,
+            camera,
+            true
+        );
+    }
+
+    bool render_textured_model(
+        Framebuffer& framebuffer, const SoAMesh& mesh, const Texture2D<std::layout_right>& texture
+    ) noexcept {
+        constexpr FreeLookCamera camera{
+            .position = Vec3f{.x = 0.0F, .y = 0.0F, .z = 3.0F},
+            .yaw = 0.0F,
+            .pitch = 0.0F,
+        };
+        return render_scene_impl(
+            framebuffer,
+            mesh,
+            0U,
+            false,
+            true,
+            false,
+            false,
+            texture,
+            camera,
+            false
+        );
+    }
+
+    bool render_textured_model(
+        Framebuffer& framebuffer, const SoAMesh& mesh, const Texture2D<LayoutTiled4x4>& texture
+    ) noexcept {
+        constexpr FreeLookCamera camera{
+            .position = Vec3f{.x = 0.0F, .y = 0.0F, .z = 3.0F},
+            .yaw = 0.0F,
+            .pitch = 0.0F,
+        };
+        return render_scene_impl(
+            framebuffer,
+            mesh,
+            0U,
+            false,
+            true,
+            false,
+            false,
+            texture,
+            camera,
+            false
+        );
+    }
+
+    bool render_textured_model(
+        Framebuffer& framebuffer, const SoAMesh& mesh, const Texture2D<LayoutMorton>& texture
+    ) noexcept {
+        constexpr FreeLookCamera camera{
+            .position = Vec3f{.x = 0.0F, .y = 0.0F, .z = 3.0F},
+            .yaw = 0.0F,
+            .pitch = 0.0F,
+        };
+        return render_scene_impl(
+            framebuffer,
+            mesh,
+            0U,
+            false,
+            true,
+            false,
+            false,
+            texture,
+            camera,
+            false
+        );
     }
 } // namespace raster::render

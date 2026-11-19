@@ -1,5 +1,6 @@
 #include <array>
 #include <catch2/catch_test_macros.hpp>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -9,6 +10,7 @@
 
 #include "raster/io/obj_loader.hpp"
 #include "raster/io/tga_loader.hpp"
+#include "raster/math/vec.hpp"
 
 #if defined(__clang__)
 #pragma clang diagnostic push
@@ -74,16 +76,78 @@ f -4/-4/-1 -3/-3/-1 -2/-2/-1
             std::filesystem::path{RASTER_ASSET_DIR} / "models/raster_milestone.obj"
         );
         REQUIRE(mesh.has_value());
-        REQUIRE(mesh->triangle_count() == 2);
+        REQUIRE(mesh->triangle_count() == 384U);
         REQUIRE(mesh->has_consistent_vertex_streams());
-        REQUIRE(mesh->positions.size() == 4);
-        REQUIRE(mesh->uvs.size() == 4);
-        REQUIRE(mesh->normals.size() == 4);
+        REQUIRE(mesh->positions.size() == 225U);
+        REQUIRE(mesh->uvs.size() == 225U);
+        REQUIRE(mesh->normals.size() == mesh->positions.size());
         for (const auto index : mesh->indices) {
             REQUIRE(index < mesh->positions.size());
             REQUIRE(index < mesh->uvs.size());
             REQUIRE(index < mesh->normals.size());
         }
+        for (std::size_t triangle = 0; triangle < mesh->triangle_count(); ++triangle) {
+            const auto ia = static_cast<std::size_t>(mesh->indices[triangle * 3U]);
+            const auto ib = static_cast<std::size_t>(mesh->indices[triangle * 3U + 1U]);
+            const auto ic = static_cast<std::size_t>(mesh->indices[triangle * 3U + 2U]);
+            const auto face_normal = raster::cross(
+                mesh->positions[ib] - mesh->positions[ia],
+                mesh->positions[ic] - mesh->positions[ia]
+            );
+            REQUIRE(raster::dot(face_normal, mesh->normals[0]) > 0.0F);
+        }
+    }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE(
+        "two-triangle floor fixture is loadable for long-triangle tests", "[asset][obj][floor]"
+    ) {
+        const auto mesh = raster::load_obj(
+            std::filesystem::path{RASTER_ASSET_DIR} / "models/raster_milestone_2tri.obj"
+        );
+        REQUIRE(mesh.has_value());
+        REQUIRE(mesh->triangle_count() == 2U);
+        REQUIRE(mesh->positions.size() == 4U);
+        REQUIRE(mesh->uvs.size() == 4U);
+        REQUIRE(mesh->normals.size() == mesh->positions.size());
+        for (std::size_t triangle = 0; triangle < mesh->triangle_count(); ++triangle) {
+            const auto ia = static_cast<std::size_t>(mesh->indices[triangle * 3U]);
+            const auto ib = static_cast<std::size_t>(mesh->indices[triangle * 3U + 1U]);
+            const auto ic = static_cast<std::size_t>(mesh->indices[triangle * 3U + 2U]);
+            const auto face_normal = raster::cross(
+                mesh->positions[ib] - mesh->positions[ia],
+                mesh->positions[ic] - mesh->positions[ia]
+            );
+            REQUIRE(raster::length_squared(face_normal) > 0.0F);
+            REQUIRE(raster::dot(face_normal, mesh->normals[0]) > 0.0F);
+        }
+    }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE(
+        "replacement checker TGA preserves diagnostic colors and markers", "[asset][tga][texture]"
+    ) {
+        const auto image =
+            raster::load_tga(std::filesystem::path{RASTER_ASSET_DIR} / "textures/checker.tga");
+        REQUIRE(image.has_value());
+        REQUIRE(image->width == 512U);
+        REQUIRE(image->height == 512U);
+        REQUIRE(image->pixels.size() == 512U * 512U);
+
+        bool saw_background = false;
+        bool saw_red_marker = false;
+        bool saw_green_channel_variation = false;
+        for (const auto pixel : image->pixels) {
+            const auto red = (pixel >> 16U) & 0xFFU;
+            const auto green = (pixel >> 8U) & 0xFFU;
+            const auto blue = pixel & 0xFFU;
+            saw_background = saw_background || pixel == 0xFF14141CU;
+            saw_red_marker = saw_red_marker || (red > 200U && red > green * 2U && red > blue * 2U);
+            saw_green_channel_variation = saw_green_channel_variation || green > 120U;
+        }
+        REQUIRE(saw_background);
+        REQUIRE(saw_red_marker);
+        REQUIRE(saw_green_channel_variation);
     }
 
     // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
@@ -92,9 +156,64 @@ f -4/-4/-1 -3/-3/-1 -2/-2/-1
             std::filesystem::path{RASTER_ASSET_DIR} / "models/clipping_sphere.obj"
         );
         REQUIRE(mesh.has_value());
-        REQUIRE(mesh->triangle_count() == 16U * 32U * 2U);
+        REQUIRE(mesh->triangle_count() == 64U * (2U * 31U));
         REQUIRE(mesh->has_consistent_vertex_streams());
         REQUIRE(mesh->positions.size() > 500U);
+    }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE(
+        "clipping sphere has exact poles and nondegenerate cap triangles", "[asset][obj][sphere]"
+    ) {
+        const auto mesh = raster::load_obj(
+            std::filesystem::path{RASTER_ASSET_DIR} / "models/clipping_sphere.obj"
+        );
+        REQUIRE(mesh.has_value());
+
+        constexpr std::size_t sectors = 64U;
+        constexpr std::size_t stacks = 32U;
+        const auto south_pole = mesh->positions[0];
+        REQUIRE(std::hypot(south_pole.x, south_pole.z) < 1e-6F);
+        REQUIRE(south_pole.y == -2.0F);
+
+        // The first 32 triangles are the south cap and the final 32 are the
+        // north cap: exactly one nondegenerate triangle per longitude sector.
+        REQUIRE(mesh->triangle_count() == sectors * stacks * 2U - sectors * 2U);
+        for (const auto face : std::views::iota(std::size_t{0}, sectors)) {
+            const auto a = static_cast<std::size_t>(mesh->indices[face * 3U]);
+            const auto b = static_cast<std::size_t>(mesh->indices[face * 3U + 1U]);
+            const auto c = static_cast<std::size_t>(mesh->indices[face * 3U + 2U]);
+            const auto ab = mesh->positions[b] - mesh->positions[a];
+            const auto ac = mesh->positions[c] - mesh->positions[a];
+            REQUIRE(raster::length_squared(raster::cross(ab, ac)) > 1e-8F);
+            REQUIRE(mesh->uvs[a].x >= 0.0F);
+            REQUIRE(mesh->uvs[a].x <= 1.0F);
+            const auto min_u = std::min({mesh->uvs[a].x, mesh->uvs[b].x, mesh->uvs[c].x});
+            const auto max_u = std::max({mesh->uvs[a].x, mesh->uvs[b].x, mesh->uvs[c].x});
+            REQUIRE(max_u - min_u <= 1.0F / static_cast<float>(sectors) + 1e-6F);
+        }
+
+        const auto first_north_cap_face = sectors * (2U * (stacks - 2U)) + sectors;
+        std::size_t north_pole_hits = 0;
+        for (const auto corner : std::views::iota(std::size_t{0}, std::size_t{3})) {
+            const auto index =
+                static_cast<std::size_t>(mesh->indices[first_north_cap_face * 3U + corner]);
+            const auto& point = mesh->positions[index];
+            if (point.y > 1.99999F && std::hypot(point.x, point.z) < 1e-6F) {
+                ++north_pole_hits;
+            }
+        }
+        REQUIRE(north_pole_hits == 1U);
+
+        const auto first_regular_face = sectors;
+        const auto a = static_cast<std::size_t>(mesh->indices[first_regular_face * 3U]);
+        const auto b = static_cast<std::size_t>(mesh->indices[first_regular_face * 3U + 1U]);
+        const auto c = static_cast<std::size_t>(mesh->indices[first_regular_face * 3U + 2U]);
+        const auto ab = mesh->positions[b] - mesh->positions[a];
+        const auto ac = mesh->positions[c] - mesh->positions[a];
+        const auto face_normal = raster::cross(ab, ac);
+        const auto face_center = mesh->positions[a] + mesh->positions[b] + mesh->positions[c];
+        REQUIRE(raster::dot(face_normal, face_center) > 0.0F); // outward winding
     }
 
     // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
@@ -111,7 +230,7 @@ f -4/-4/-1 -3/-3/-1 -2/-2/-1
                 minimum_u = std::min(minimum_u, mesh->uvs[index].x);
                 maximum_u = std::max(maximum_u, mesh->uvs[index].x);
             }
-            REQUIRE(maximum_u - minimum_u <= 1.0F / 32.0F + 1e-6F);
+            REQUIRE(maximum_u - minimum_u <= 1.0F / 64.0F + 1e-6F);
         }
     }
 

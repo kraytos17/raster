@@ -23,6 +23,7 @@
 #include "raster/pipeline/clipper.hpp"
 #include "raster/pipeline/rasterizer.hpp"
 #include "raster/pipeline/shader.hpp"
+#include "raster/render/scene_renderer.hpp"
 
 #if defined(__clang__)
 #pragma clang diagnostic push
@@ -30,6 +31,30 @@
 #endif
 
 namespace {
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE(
+        "free-look forward speed scales with distance and remains bounded", "[scene][camera]"
+    ) {
+        const auto near_speed = raster::render::free_look_movement_speed(
+            raster::Vec3f{.x = 0.0F, .y = 0.0F, .z = 1.0F}
+        );
+        const auto initial_speed = raster::render::free_look_movement_speed(
+            raster::Vec3f{.x = 0.0F, .y = 0.0F, .z = 3.0F}
+        );
+        const auto far_speed = raster::render::free_look_movement_speed(
+            raster::Vec3f{.x = 0.0F, .y = 0.0F, .z = 20.0F}
+        );
+        const auto extreme_speed = raster::render::free_look_movement_speed(
+            raster::Vec3f{.x = 0.0F, .y = 0.0F, .z = 1000.0F}
+        );
+
+        REQUIRE(near_speed == 2.5F);
+        REQUIRE(initial_speed == 2.5F);
+        REQUIRE(far_speed > initial_speed);
+        REQUIRE(far_speed < 20.0F);
+        REQUIRE(extreme_speed == 20.0F);
+    }
+
     struct CheckerFloorShader final : raster::ShaderBase {
         struct Varyings {
             raster::Vec4f clip_pos{};
@@ -235,7 +260,7 @@ namespace {
             std::filesystem::path{RASTER_ASSET_DIR} / "models/clipping_sphere.obj"
         );
         REQUIRE(mesh.has_value());
-        REQUIRE(mesh->triangle_count() >= 1000U);
+        REQUIRE(mesh->triangle_count() == 64U * 32U * 2U - 64U * 2U);
 
         const auto eye = raster::Vec3f{};
         const auto view = raster::look_at4f(
@@ -398,15 +423,17 @@ namespace {
         REQUIRE(triangle.has_value());
 
         raster::TgaImage checker_image{};
-        checker_image.width = 64U;
-        checker_image.height = 64U;
+        checker_image.width = 128U;
+        checker_image.height = 128U;
         checker_image.pixels.resize(checker_image.width * checker_image.height);
         for (const auto y : std::views::iota(std::size_t{0}, checker_image.height)) {
             for (const auto x : std::views::iota(std::size_t{0}, checker_image.width)) {
+                const auto cell = (x / 8U) + (y / 8U);
                 checker_image.pixels[y * checker_image.width + x] =
-                    ((x + y) & 1U) == 0U ? 0xFFFFFFFFU : 0xFF000000U;
+                    (cell & 1U) == 0U ? 0xFFFFFFFFU : 0xFF000000U;
             }
         }
+
         const raster::Texture2D<raster::LayoutTiled4x4> checker{checker_image};
         std::vector<float> depth_storage(width * height, 0.0F);
         depth_storage[3U * width + 4U] = 1.0F; // occlude one covered lane at the silhouette
@@ -418,6 +445,9 @@ namespace {
         float minimum_partial_lod = std::numeric_limits<float>::infinity();
         float maximum_partial_lod = 0.0F;
         std::size_t tested_visible_lanes = 0;
+        std::size_t bright_pixels = 0;
+        std::size_t dark_pixels = 0;
+        std::vector<std::uint32_t> rendered_pixels(width * height, 0U);
         raster::rasterize_triangle_quads(
             *triangle,
             width,
@@ -438,8 +468,8 @@ namespace {
             for (const auto lane : std::views::iota(std::size_t{0}, std::size_t{4})) {
                 const auto& bary = quad.lanes[lane];
                 helper_uv[lane] = raster::Vec2f{
-                    .x = bary.a1 * 8.0F,
-                    .y = bary.a2 * 8.0F,
+                    .x = bary.a1 * 0.25F,
+                    .y = bary.a2 * 0.375F,
                 };
                 REQUIRE(std::isfinite(helper_uv[lane].x));
                 REQUIRE(std::isfinite(helper_uv[lane].y));
@@ -447,12 +477,12 @@ namespace {
             const auto derivatives = raster::quad_derivatives(helper_uv);
             const auto lod = raster::mip_lod(derivatives, checker.width(), checker.height());
             // The test triangle maps screen x/y linearly to u/v with slopes
-            // du/dx=2 and dv/dy=4/3. These are independent analytic gradients.
-            REQUIRE(std::fabs(derivatives.duv_dx.x - 2.0F) < 1e-5F);
+            // du/dx=dv/dy=1/16. The expected LOD is therefore log2(8)=3.
+            REQUIRE(std::fabs(derivatives.duv_dx.x - (1.0F / 16.0F)) < 1e-5F);
             REQUIRE(std::fabs(derivatives.duv_dx.y) < 1e-5F);
             REQUIRE(std::fabs(derivatives.duv_dy.x) < 1e-5F);
-            REQUIRE(std::fabs(derivatives.duv_dy.y - (4.0F / 3.0F)) < 1e-5F);
-            REQUIRE(std::fabs(lod - 7.0F) < 1e-5F);
+            REQUIRE(std::fabs(derivatives.duv_dy.y - (1.0F / 16.0F)) < 1e-5F);
+            REQUIRE(std::fabs(lod - 3.0F) < 1e-5F);
             REQUIRE(std::isfinite(derivatives.duv_dx.x));
             REQUIRE(std::isfinite(derivatives.duv_dx.y));
             REQUIRE(std::isfinite(derivatives.duv_dy.x));
@@ -466,10 +496,16 @@ namespace {
                 }
                 const auto filtered =
                     checker.sample_trilinear(helper_uv[lane].x, helper_uv[lane].y, lod);
-                // The analytic LOD is 7, clamped to the terminal 1x1 level.
-                // An even 64x64 black/white checker averages to channel 127.
-                REQUIRE(filtered == checker.level(checker.level_count() - 1U).texels[0]);
-                REQUIRE(filtered == 0xFF7F7F7FU);
+                // Independent analytic reference: the expected derivative gives
+                // LOD 3, and the texture sampler evaluates that explicit LOD.
+                const auto reference =
+                    checker.sample_trilinear(helper_uv[lane].x, helper_uv[lane].y, 3.0F);
+                REQUIRE(filtered == reference);
+                const auto x = quad_x + (lane & 1U);
+                const auto y = quad_y + (lane >> 1U);
+                rendered_pixels[y * width + x] = filtered;
+                bright_pixels += filtered == 0xFFFFFFFFU ? 1U : 0U;
+                dark_pixels += filtered == 0xFF000000U ? 1U : 0U;
                 ++tested_visible_lanes;
             }
             INFO("partial quad at " << quad_x << ',' << quad_y);
@@ -479,7 +515,147 @@ namespace {
         REQUIRE(saw_partially_occluded_quad);
         REQUIRE(tested_visible_lanes > 0U);
         REQUIRE(maximum_partial_lod - minimum_partial_lod < 1e-5F);
-        REQUIRE(std::fabs(minimum_partial_lod - 7.0F) < 0.1F);
+        REQUIRE(std::fabs(minimum_partial_lod - 3.0F) < 0.1F);
+        REQUIRE(bright_pixels > 0U);
+        REQUIRE(dark_pixels > 0U);
+        for (const auto pixel : rendered_pixels) {
+            const bool is_valid_output =
+                pixel == 0U || pixel == 0xFFFFFFFFU || pixel == 0xFF000000U;
+            REQUIRE(is_valid_output);
+        }
+    }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE(
+        "pole-facing sphere solid-color diagnostic has complete coverage", "[scene][sphere][poles]"
+    ) {
+        constexpr std::size_t width = 240U;
+        constexpr std::size_t height = 180U;
+        const auto mesh = raster::load_obj(
+            std::filesystem::path{RASTER_ASSET_DIR} / "models/clipping_sphere.obj"
+        );
+        REQUIRE(mesh.has_value());
+
+        raster::TgaImage one_texel{};
+        one_texel.width = 1U;
+        one_texel.height = 1U;
+        one_texel.pixels.push_back(0xFF336699U);
+        const raster::Texture2D<raster::LayoutTiled4x4> texture{one_texel};
+        const auto camera = [](float pitch) noexcept {
+            return raster::render::FreeLookCamera{
+                .position = raster::Vec3f{.x = 0.0F, .y = pitch > 0.0F ? -3.0F : 3.0F, .z = 0.0F},
+                .yaw = 0.0F,
+                .pitch = pitch,
+            };
+        };
+
+        for (const auto pitch : {1.35F, -1.35F}) {
+            raster::Framebuffer framebuffer{width, height};
+            const auto rendered = raster::render::render_scene(
+                framebuffer,
+                *mesh,
+                0U,
+                false,
+                true,
+                false,
+                true,
+                texture,
+                camera(pitch)
+            );
+            REQUIRE(rendered);
+
+            std::size_t sphere_pixels = 0;
+            const auto colors = std::as_const(framebuffer).color_view();
+            const auto depths = std::as_const(framebuffer).depth_view();
+            for (const auto y : std::views::iota(std::size_t{0}, height)) {
+                for (const auto x : std::views::iota(std::size_t{0}, width)) {
+                    const auto color = colors[y, x];
+                    const auto depth = depths[y, x];
+                    REQUIRE(std::isfinite(depth));
+                    if (depth > 0.0F) {
+                        ++sphere_pixels;
+                        REQUIRE(color == 0xFFB0B0B0U);
+                    } else {
+                        REQUIRE(color == 0xFF101018U);
+                    }
+                }
+            }
+            REQUIRE(sphere_pixels > width * height / 10U);
+        }
+    }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE("sphere pole remains covered as projected cap shrinks", "[scene][sphere][coverage]") {
+        constexpr std::size_t width = 320U;
+        constexpr std::size_t height = 240U;
+        constexpr std::size_t center_x = width / 2U;
+        constexpr std::size_t center_y = height / 2U;
+        const auto mesh = raster::load_obj(
+            std::filesystem::path{RASTER_ASSET_DIR} / "models/clipping_sphere.obj"
+        );
+        REQUIRE(mesh.has_value());
+
+        raster::TgaImage one_texel{};
+        one_texel.width = 1U;
+        one_texel.height = 1U;
+        one_texel.pixels.push_back(0xFF336699U);
+        const raster::Texture2D<raster::LayoutTiled4x4> texture{one_texel};
+        constexpr std::array<float, 4> pole_camera_heights{2.25F, 3.0F, 5.0F, 10.0F};
+
+        for (const auto pole_height : pole_camera_heights) {
+            raster::Framebuffer framebuffer{width, height};
+            const raster::render::FreeLookCamera camera{
+                .position = raster::Vec3f{.x = 0.0F, .y = pole_height, .z = 0.0F},
+                .yaw = 0.0F,
+                .pitch = -std::numbers::pi_v<float> / 2.0F,
+            };
+            REQUIRE(
+                raster::render::
+                    render_scene(framebuffer, *mesh, 0U, false, true, false, true, texture, camera)
+            );
+            const auto color = std::as_const(framebuffer).color_view();
+            const auto depth = std::as_const(framebuffer).depth_view();
+            INFO("north-pole camera height " << pole_height);
+            REQUIRE(depth[center_y, center_x] > 0.0F);
+            REQUIRE(color[center_y, center_x] == 0xFFB0B0B0U);
+        }
+    }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE("sphere camera-axis ray remains covered as it recedes", "[scene][sphere][coverage]") {
+        constexpr std::size_t width = 320U;
+        constexpr std::size_t height = 240U;
+        constexpr std::size_t center_x = width / 2U;
+        constexpr std::size_t center_y = height / 2U;
+        const auto mesh = raster::load_obj(
+            std::filesystem::path{RASTER_ASSET_DIR} / "models/clipping_sphere.obj"
+        );
+        REQUIRE(mesh.has_value());
+
+        raster::TgaImage one_texel{};
+        one_texel.width = 1U;
+        one_texel.height = 1U;
+        one_texel.pixels.push_back(0xFF336699U);
+        const raster::Texture2D<raster::LayoutTiled4x4> texture{one_texel};
+        constexpr std::array<float, 5> camera_distances{3.0F, 4.0F, 5.0F, 8.0F, 12.0F};
+
+        for (const auto distance : camera_distances) {
+            raster::Framebuffer framebuffer{width, height};
+            const raster::render::FreeLookCamera camera{
+                .position = raster::Vec3f{.x = 0.0F, .y = 0.0F, .z = distance},
+                .yaw = 0.0F,
+                .pitch = 0.0F,
+            };
+            REQUIRE(
+                raster::render::
+                    render_scene(framebuffer, *mesh, 0U, false, true, false, true, texture, camera)
+            );
+            const auto color = std::as_const(framebuffer).color_view();
+            const auto depth = std::as_const(framebuffer).depth_view();
+            INFO("camera +Z distance " << distance);
+            REQUIRE(depth[center_y, center_x] > 0.0F);
+            REQUIRE(color[center_y, center_x] == 0xFFB0B0B0U);
+        }
     }
 } // namespace
 

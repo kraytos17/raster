@@ -91,9 +91,13 @@ free-look:
     cmake --build --preset release-native --parallel {{ jobs }} --target raster
     RASTER_FREE_LOOK_TEST=1 ./build/release-native/raster
 
-# Compare quad-local fetch costs for row-major, tiled4x4, and Morton layouts.
+# Compare quad-local texture fetches, or render the sphere scene with each texture layout.
 texture-benchmark: (_build preset 'raster_texture_benchmark')
     ./{{ build_dir }}/raster_texture_benchmark
+
+[positional-arguments]
+texture-benchmark-scene *args: (_build preset 'raster_texture_benchmark')
+    ./{{ build_dir }}/raster_texture_benchmark scene {{ args }}
 
 # Reformat all project C++ files.
 format: (_build preset 'format')

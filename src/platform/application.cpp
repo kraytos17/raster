@@ -55,6 +55,7 @@ namespace raster::platform {
             bool clip_stress_test{};
             bool free_look_test{};
             bool guard_band_test{};
+            bool solid_color_debug{};
             raster::render::FreeLookCamera camera{
                 .position = raster::Vec3f{.x = 0.0F, .y = 0.0F, .z = 3.0F},
                 .yaw = 0.0F,
@@ -297,6 +298,13 @@ namespace raster::platform {
                         state.guard_band_test ? "guard-band" : "six-plane"
                     );
                 }
+                if (event->key.key == SDLK_F3) {
+                    state.solid_color_debug = !state.solid_color_debug;
+                    std::println(
+                        "raster: {} shading",
+                        state.solid_color_debug ? "solid-color pole diagnostic" : "textured"
+                    );
+                }
             }
         }
         return SDL_APP_CONTINUE;
@@ -318,7 +326,6 @@ namespace raster::platform {
         const auto frame_start_ns = SDL_GetTicksNS();
         const auto now = frame_start_ns;
         if (state.free_look_test) {
-            constexpr float move_speed = 2.5F;
             constexpr float vertical_speed = 2.0F;
             const auto frame_dt = std::clamp(
                 static_cast<float>(static_cast<double>(now - state.previous_frame_ns) * 1e-9),
@@ -338,6 +345,8 @@ namespace raster::platform {
                 .y = 0.0F,
                 .z = std::sin(state.camera.yaw),
             };
+
+            const auto move_speed = raster::render::free_look_movement_speed(state.camera.position);
             if (keys[SDL_SCANCODE_W]) {
                 state.camera.position = state.camera.position + forward * (move_speed * frame_dt);
             }
@@ -389,6 +398,7 @@ namespace raster::platform {
                 state.clip_stress_test,
                 state.free_look_test,
                 state.guard_band_test,
+                state.solid_color_debug,
                 state.texture,
                 state.camera
             );

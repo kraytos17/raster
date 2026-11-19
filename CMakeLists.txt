@@ -94,8 +94,13 @@ raster_apply_sanitizers(raster)
 raster_apply_static_analysis(raster)
 raster_apply_clang_tidy(raster)
 
-add_executable(raster_texture_benchmark bench/texture_layout_benchmark.cpp)
+add_executable(raster_texture_benchmark
+    bench/texture_layout_benchmark.cpp
+    src/render/scene_renderer.cpp
+)
+
 target_link_libraries(raster_texture_benchmark PRIVATE raster::engine)
+target_compile_definitions(raster_texture_benchmark PRIVATE RASTER_ASSET_DIR="${PROJECT_SOURCE_DIR}/assets")
 raster_apply_optimization(raster_texture_benchmark)
 raster_apply_sanitizers(raster_texture_benchmark)
 raster_apply_static_analysis(raster_texture_benchmark)
@@ -127,6 +132,7 @@ if(RASTER_BUILD_TESTS)
         tests/test_scene.cpp
         tests/test_texture.cpp
         tests/test_shader.cpp
+        src/render/scene_renderer.cpp
     )
     target_compile_definitions(raster_tests PRIVATE RASTER_ASSET_DIR="${PROJECT_SOURCE_DIR}/assets")
 
