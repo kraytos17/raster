@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Check raster's required and optional development tools."""
 
 from __future__ import annotations
@@ -6,7 +5,6 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
-
 
 TOOLS: tuple[tuple[str, bool], ...] = (
     ("cmake", True),

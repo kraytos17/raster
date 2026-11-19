@@ -1,23 +1,22 @@
 #include <algorithm>
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
 #include <mdspan>
 #include <print>
+#include <ranges>
+#include <SDL3/SDL.h>
 #include <vector>
 
 #include "raster/memory/texture_layout.hpp"
 
 namespace {
-    using std::chrono::duration;
-    using std::chrono::steady_clock;
-
     using Extents = std::dextents<std::size_t, 2>;
-    constexpr std::size_t texture_width = 512;
-    constexpr std::size_t texture_height = 512;
-    constexpr std::size_t quad_grid = 256;
-    constexpr std::size_t iterations = 32;
+    constexpr std::size_t texture_width = 1024;
+    constexpr std::size_t texture_height = 1024;
+    constexpr std::size_t quad_grid = texture_width / 2U;
+    constexpr std::size_t warmup_passes = 2;
+    constexpr std::size_t measured_passes = 7;
     constexpr std::size_t quad_count = quad_grid * quad_grid;
 
     void report_failure(const char* message) noexcept {
@@ -29,8 +28,8 @@ namespace {
     }
 
     struct QuadOrigin {
-        std::uint16_t x{};
-        std::uint16_t y{};
+        std::uint32_t x{};
+        std::uint32_t y{};
     };
 
     [[nodiscard]]
@@ -41,8 +40,8 @@ namespace {
             for (std::size_t x = 0; x < quad_grid; ++x) {
                 order.push_back(
                     QuadOrigin{
-                        .x = static_cast<std::uint16_t>(x * 2U),
-                        .y = static_cast<std::uint16_t>(y * 2U),
+                        .x = static_cast<std::uint32_t>(x * 2U),
+                        .y = static_cast<std::uint32_t>(y * 2U),
                     }
                 );
             }
@@ -64,6 +63,25 @@ namespace {
     }
 
     template <typename Mapping> [[nodiscard]]
+    std::uint64_t run_pass(
+        const Mapping& mapping,
+        const std::vector<QuadOrigin>& order,
+        const volatile std::uint32_t* texels,
+        std::uint64_t& checksum
+    ) noexcept {
+        const auto start = SDL_GetTicksNS();
+        for (const auto& quad : order) {
+            const auto x = static_cast<std::size_t>(quad.x);
+            const auto y = static_cast<std::size_t>(quad.y);
+            checksum += texels[mapping(y, x)];
+            checksum += texels[mapping(y, x + 1U)];
+            checksum += texels[mapping(y + 1U, x)];
+            checksum += texels[mapping(y + 1U, x + 1U)];
+        }
+        return SDL_GetTicksNS() - start;
+    }
+
+    template <typename Mapping> [[nodiscard]]
     double benchmark_layout(
         const char* name, const Mapping& mapping, const std::vector<QuadOrigin>& order
     ) {
@@ -76,23 +94,30 @@ namespace {
 
         std::uint64_t checksum = 0;
         const volatile std::uint32_t* const texels = storage.data();
-        const auto start = steady_clock::now();
-        for (std::size_t iteration = 0; iteration < iterations; ++iteration) {
-            for (const auto& quad : order) {
-                const auto x = static_cast<std::size_t>(quad.x);
-                const auto y = static_cast<std::size_t>(quad.y);
-                checksum += texels[mapping(y, x)];
-                checksum += texels[mapping(y, x + 1U)];
-                checksum += texels[mapping(y + 1U, x)];
-                checksum += texels[mapping(y + 1U, x + 1U)];
-            }
+        for ([[maybe_unused]]
+             const auto pass : std::views::iota(std::size_t{0}, warmup_passes)) {
+            static_cast<void>(run_pass(mapping, order, texels, checksum));
         }
 
-        const auto elapsed = duration<double>(steady_clock::now() - start).count();
-        const auto samples = static_cast<double>(quad_grid * quad_grid * 4U * iterations);
-        const auto ns_per_sample = elapsed * 1.0e9 / samples;
-        std::println("{}: {:.3f} ns/sample, checksum={}", name, ns_per_sample, checksum);
-        return ns_per_sample;
+        std::vector<std::uint64_t> timings;
+        timings.reserve(measured_passes);
+        for ([[maybe_unused]]
+             const auto pass : std::views::iota(std::size_t{0}, measured_passes)) {
+            timings.push_back(run_pass(mapping, order, texels, checksum));
+        }
+
+        std::ranges::sort(timings);
+        const auto median_ns = timings[timings.size() / 2U];
+        const auto ns_per_quad = static_cast<double>(median_ns) / static_cast<double>(quad_count);
+        std::println(
+            "{}: median {:.3f} ms/pass, {:.3f} ns/quad ({} runs), checksum={}",
+            name,
+            static_cast<double>(median_ns) / 1.0e6,
+            ns_per_quad,
+            measured_passes,
+            checksum
+        );
+        return ns_per_quad;
     }
 } // namespace
 
@@ -105,10 +130,11 @@ int main() noexcept {
         const auto sequential_order = make_quad_order(false);
         const auto randomized_order = make_quad_order(true);
         std::println(
-            "{}x{} texture, {} complete 2x2-quad passes; timings are diagnostic (not a substitute for perf counters)",
+            "{}x{} texture; {} warmups, {} measured full quad passes (median)",
             texture_width,
             texture_height,
-            iterations
+            warmup_passes,
+            measured_passes
         );
 
         const auto row_major_ns =

@@ -9,6 +9,7 @@ A C++23 CPU software rasterizer. Uses SDL3's callback lifecycle for windowing an
 - **Homogeneous clipping:** Stack-allocated, fixed-capacity 6-plane Sutherland–Hodgman clipping and fan triangulation prior to perspective divide.
 - **Zero-overhead shaders:** Static dispatch via C++23 concepts (no RTTI or virtual calls).
 - **Asset loading:** Bounds-checked OBJ parser (`std::expected`, `std::generator`, `std::from_chars`, `std::flat_map`) and TGA type-2 (24/32-bit) loader using byte spans, `std::bit_cast`, and `std::byteswap`.
+- **Texturing:** Morton and 4×4 tiled texture layouts, mip pyramids, bilinear/trilinear filtering, and 2×2 quad derivative-based mip selection.
 - **Memory layout:** 64-byte-aligned flat color/depth buffers exposed via `std::mdspan` views.
 
 ## Requirements
@@ -45,11 +46,11 @@ A `Justfile` wraps `CMakePresets.json` for common tasks:
 just                                      # list all recipes
 just doctor                               # verify toolchain and SDL3
 just preset=release-native build          # build a specific preset
-just preset=release-native texture-benchmark # compare row-major, tiled, Morton layouts
+just preset=release-native texture-benchmark # median row-major, tiled, Morton quad-fetch benchmark
 just preset=debug-sanitized test          # run Catch2 test suite
 just preset=debug-sanitized resize-gate   # headless SDL resize/minimize test under ASan
 just preset=debug-sanitized clip-stress-gate # high-poly camera-through + allocation trap
-just free-look                             # release-native; 1/3-res mouse look + WASD, F2 toggles guard band
+just free-look                             # release-native; 60 FPS-paced adaptive-resolution mouse look
 just verify                               # format check, cppcheck, clang-tidy, sanitized tests
 just run                                  # build and run
 ```
@@ -60,9 +61,9 @@ Override defaults locally by setting `RASTER_PRESET` / `RASTER_JOBS` or copying 
 
 - [x] **M1 — Framebuffer & SDL3 shell:** Callback lifecycle, HiDPI resize/minimize handling, aligned `mdspan` buffers.
 - [x] **M2 — Fixed-point rasterizer:** 28.4 coordinates, top-left rule, 2×2 quads, seam/coverage tests.
-- [x] **M3 — 3D & perspective interpolation:** Reverse-Z depth, shader concepts, procedural checker scene, and a Catch2 near-to-far render-path test. Interactive visual inspection remains outstanding.
-- [ ] **M4 — Clipping & asset loaders** *(in progress)*: Six-plane clipping remains the default correctness path. The high-poly sanitizer test compares it with an experimental 2× X/Y guard band; for the bundled camera-through traversal the guard band generates fewer output triangles. `just preset=debug-sanitized clip-stress-gate` verifies 120 frames and zero C++ allocations during rendering. Run `just free-look` on a display for interactive visual inspection; mouse moves the view, WASD moves horizontally, Q/E moves vertically, F2 switches clipping policies, and Escape exits.
-- [ ] **M5 — Textures & mipmapping** *(started; incomplete)*: Morton and 4×4 tiled `mdspan` mappings, TGA-to-texture conversion, mip pyramid generation, bilinear/trilinear sampling, and 2×2 quad derivative-driven shader LOD are implemented. Tests cover mip minification and partially covered, partially occluded helper quads. `just preset=release-native texture-benchmark` compares sequential and shuffled row-major/tiled/Morton accesses; use `perf stat -e cache-references,cache-misses ./build/release-native/raster_texture_benchmark` to record hardware counters. The interactive silhouette artifact check and target-machine measurements remain outstanding.
+- [x] **M3 — 3D & perspective interpolation:** Reverse-Z depth, shader concepts, procedural checker scene, and a Catch2 near-to-far render-path test. The checker-floor render test passes; continue to use it as a reference when changing texture filtering.
+- [ ] **M4 — Clipping & asset loaders** *(verification in progress)*: Six-plane clipping remains the default correctness path. The high-poly sanitizer test compares it with an experimental 2× X/Y guard band; for the bundled camera-through traversal the guard band generates fewer output triangles. `just preset=debug-sanitized clip-stress-gate` verifies 120 frames and zero C++ allocations during rendering. The sphere has been visually inspected in free-look, but systematic comparison of clipping modes and the full range of through-mesh/extreme-edge cases remains outstanding. Controls: mouse look, WASD movement, Q/E vertical, F2 switches clipping policies, Escape exits.
+- [ ] **M5 — Textures & mipmapping** *(verification in progress)*: Morton and 4×4 tiled `mdspan` mappings, TGA-to-texture conversion, mip pyramids, bilinear/trilinear sampling, and 2×2 quad derivative-driven shader LOD are implemented. Tests cover minification and partially covered/occluded helper quads. `just preset=release-native texture-benchmark` runs two warmups and seven measured 1024×1024 passes per row-major/tiled/Morton layout, in sequential and shuffled quad order, and reports median time. Timings are diagnostic; use `perf stat -e cache-references,cache-misses ./build/release-native/raster_texture_benchmark` for hardware counters. Interactive silhouette mip-seam validation and target-machine benchmark results remain outstanding.
 - [ ] **M6 — Multithreaded tile engine:** 16×16 tile binning, `std::jthread` work-stealing, per-thread transient arenas, zero-allocation frame verification, and TSan validation.
 
 ### Future Ideas
@@ -71,3 +72,5 @@ Override defaults locally by setting `RASTER_PRESET` / `RASTER_JOBS` or copying 
 - Hierarchical-Z per-tile rejection
 - Shadow mapping, Cook–Torrance GGX PBR, or tiled deferred shading
 - Terminal presenter (UTF-8 half-blocks + 24-bit TrueColor)
+
+Free-look targets 60 FPS, renders at an adaptive internal resolution (initially 1/3 scale), and reports frame-time p95/p99 plus the active scale. It reduces resolution after repeated budget misses and restores detail only after sustained headroom. This is best-effort pacing, not a hard real-time guarantee.

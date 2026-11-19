@@ -446,6 +446,13 @@ namespace {
             }
             const auto derivatives = raster::quad_derivatives(helper_uv);
             const auto lod = raster::mip_lod(derivatives, checker.width(), checker.height());
+            // The test triangle maps screen x/y linearly to u/v with slopes
+            // du/dx=2 and dv/dy=4/3. These are independent analytic gradients.
+            REQUIRE(std::fabs(derivatives.duv_dx.x - 2.0F) < 1e-5F);
+            REQUIRE(std::fabs(derivatives.duv_dx.y) < 1e-5F);
+            REQUIRE(std::fabs(derivatives.duv_dy.x) < 1e-5F);
+            REQUIRE(std::fabs(derivatives.duv_dy.y - (4.0F / 3.0F)) < 1e-5F);
+            REQUIRE(std::fabs(lod - 7.0F) < 1e-5F);
             REQUIRE(std::isfinite(derivatives.duv_dx.x));
             REQUIRE(std::isfinite(derivatives.duv_dx.y));
             REQUIRE(std::isfinite(derivatives.duv_dy.x));
@@ -459,12 +466,9 @@ namespace {
                 }
                 const auto filtered =
                     checker.sample_trilinear(helper_uv[lane].x, helper_uv[lane].y, lod);
-                const auto expected = checker.sample_trilinear(
-                    helper_uv[lane].x,
-                    helper_uv[lane].y,
-                    raster::mip_lod(derivatives, checker.width(), checker.height())
-                );
-                REQUIRE(filtered == expected);
+                // The analytic LOD is 7, clamped to the terminal 1x1 level.
+                // An even 64x64 black/white checker averages to channel 127.
+                REQUIRE(filtered == checker.level(checker.level_count() - 1U).texels[0]);
                 REQUIRE(filtered == 0xFF7F7F7FU);
                 ++tested_visible_lanes;
             }

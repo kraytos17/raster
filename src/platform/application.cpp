@@ -1,6 +1,7 @@
 #include "raster/platform/application.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -22,7 +23,11 @@ namespace raster::platform {
     namespace {
         constexpr std::size_t initial_width = 960;
         constexpr std::size_t initial_height = 540;
-        constexpr std::size_t free_look_resolution_divisor = 3;
+        constexpr std::size_t minimum_free_look_resolution_divisor = 3;
+        constexpr std::size_t maximum_free_look_resolution_divisor = 6;
+        constexpr std::uint64_t free_look_frame_budget_ns = 16'666'667U;
+        constexpr std::uint64_t free_look_headroom_budget_ns = 12'500'000U;
+        constexpr std::size_t free_look_timing_sample_capacity = 240U;
         constexpr std::uint32_t clip_stress_frame_count = 120;
 
         struct AppState {
@@ -36,8 +41,16 @@ namespace raster::platform {
             std::uint64_t report_start_ns{};
             std::uint64_t animation_start_ns{};
             std::uint64_t previous_frame_ns{};
+            double free_look_frame_time_ema_ns{};
+            std::array<std::uint64_t, free_look_timing_sample_capacity> free_look_frame_times_ns{};
+            std::size_t free_look_frame_time_sample_count{};
+            std::size_t free_look_frame_time_sample_cursor{};
             std::uint32_t resize_step{};
             std::uint32_t clip_stress_frame{};
+            std::uint32_t free_look_over_budget_frames{};
+            std::uint64_t free_look_headroom_since_ns{};
+            std::uint64_t free_look_last_scale_change_ns{};
+            std::size_t free_look_resolution_divisor{3U};
             bool auto_resize_test{};
             bool clip_stress_test{};
             bool free_look_test{};
@@ -159,10 +172,15 @@ namespace raster::platform {
             if (!state.free_look_test || !state.free_look_framebuffer) {
                 return true;
             }
-            const auto width =
-                std::max(state.framebuffer.width / free_look_resolution_divisor, std::size_t{1});
-            const auto height =
-                std::max(state.framebuffer.height / free_look_resolution_divisor, std::size_t{1});
+
+            const auto width = std::max(
+                state.framebuffer.width / state.free_look_resolution_divisor,
+                std::size_t{1}
+            );
+            const auto height = std::max(
+                state.framebuffer.height / state.free_look_resolution_divisor,
+                std::size_t{1}
+            );
             if (state.free_look_framebuffer->width
                 == width
                 && state.free_look_framebuffer->height
@@ -201,11 +219,11 @@ namespace raster::platform {
             if (state->free_look_test) {
                 state->free_look_framebuffer = std::make_unique<raster::Framebuffer>(
                     std::max(
-                        state->framebuffer.width / free_look_resolution_divisor,
+                        state->framebuffer.width / state->free_look_resolution_divisor,
                         std::size_t{1}
                     ),
                     std::max(
-                        state->framebuffer.height / free_look_resolution_divisor,
+                        state->framebuffer.height / state->free_look_resolution_divisor,
                         std::size_t{1}
                     )
                 );
@@ -297,7 +315,8 @@ namespace raster::platform {
             return SDL_APP_CONTINUE;
         }
 
-        const auto now = SDL_GetTicksNS();
+        const auto frame_start_ns = SDL_GetTicksNS();
+        const auto now = frame_start_ns;
         if (state.free_look_test) {
             constexpr float move_speed = 2.5F;
             constexpr float vertical_speed = 2.0F;
@@ -399,6 +418,87 @@ namespace raster::platform {
             );
             return SDL_APP_FAILURE;
         }
+
+        const auto presented_ns = SDL_GetTicksNS();
+        if (state.free_look_test) {
+            const auto frame_time_ns = presented_ns - frame_start_ns;
+            state.free_look_frame_times_ns[state.free_look_frame_time_sample_cursor] =
+                frame_time_ns;
+            state.free_look_frame_time_sample_cursor =
+                (state.free_look_frame_time_sample_cursor + 1U) % free_look_timing_sample_capacity;
+            state.free_look_frame_time_sample_count = std::min(
+                state.free_look_frame_time_sample_count + 1U,
+                free_look_timing_sample_capacity
+            );
+
+            const auto frame_time = static_cast<double>(frame_time_ns);
+            state.free_look_frame_time_ema_ns = state.free_look_frame_time_ema_ns == 0.0
+                ? frame_time
+                : state.free_look_frame_time_ema_ns * 0.95 + frame_time * 0.05;
+            if (frame_time_ns > free_look_frame_budget_ns) {
+                ++state.free_look_over_budget_frames;
+                state.free_look_headroom_since_ns = 0;
+            } else {
+                state.free_look_over_budget_frames = state.free_look_over_budget_frames > 0U
+                    ? state.free_look_over_budget_frames - 1U
+                    : 0U;
+            }
+
+            if (frame_time_ns < free_look_headroom_budget_ns) {
+                if (state.free_look_headroom_since_ns == 0U) {
+                    state.free_look_headroom_since_ns = frame_start_ns;
+                }
+            } else {
+                state.free_look_headroom_since_ns = 0U;
+            }
+
+            const bool lower_resolution = state.free_look_over_budget_frames
+                >= 4U
+                && state.free_look_resolution_divisor
+                < maximum_free_look_resolution_divisor;
+            const bool sustained_headroom = state.free_look_headroom_since_ns
+                != 0U
+                && frame_start_ns
+                - state.free_look_headroom_since_ns
+                >= 5'000'000'000U;
+            const bool scale_cooldown_elapsed = state.free_look_last_scale_change_ns
+                == 0U
+                || frame_start_ns
+                - state.free_look_last_scale_change_ns
+                >= 3'000'000'000U;
+            const bool raise_resolution = sustained_headroom
+                && state.free_look_resolution_divisor
+                > minimum_free_look_resolution_divisor
+                && state.free_look_frame_time_ema_ns
+                < static_cast<double>(free_look_headroom_budget_ns);
+            bool resolution_changed = false;
+            if (scale_cooldown_elapsed && lower_resolution) {
+                ++state.free_look_resolution_divisor;
+                resolution_changed = true;
+            } else if (scale_cooldown_elapsed && raise_resolution) {
+                --state.free_look_resolution_divisor;
+                resolution_changed = true;
+            }
+
+            if (resolution_changed) {
+                if (!resize_free_look_target(state)) {
+                    std::println(stderr, "raster: adaptive free-look resolution change failed");
+                    return SDL_APP_FAILURE;
+                }
+
+                state.free_look_over_budget_frames = 0;
+                state.free_look_headroom_since_ns = 0U;
+                state.free_look_last_scale_change_ns = frame_start_ns;
+                state.free_look_frame_time_ema_ns = 0.0;
+                std::println(
+                    "raster: free-look render scale 1/{} after sustained budget condition",
+                    state.free_look_resolution_divisor
+                );
+            }
+            if (frame_time_ns < free_look_frame_budget_ns) {
+                SDL_DelayPrecise(free_look_frame_budget_ns - frame_time_ns);
+            }
+        }
         if (state.clip_stress_test && ++state.clip_stress_frame >= clip_stress_frame_count) {
             std::println(
                 "raster: clipping stress passed — {} triangles, {} frames, zero render allocations",
@@ -409,14 +509,42 @@ namespace raster::platform {
         }
 
         ++state.frame_count;
-        const auto report_elapsed_ns = now - state.report_start_ns;
+        const auto report_now_ns = state.free_look_test ? SDL_GetTicksNS() : now;
+        const auto report_elapsed_ns = report_now_ns - state.report_start_ns;
         if (report_elapsed_ns >= 1'000'000'000U) {
             const auto fps = static_cast<double>(state.frame_count)
                 * 1'000'000'000.0
                 / static_cast<double>(report_elapsed_ns);
-            std::println("raster: {:.1f} FPS", fps);
+            if (state.free_look_test && state.free_look_frame_time_sample_count > 0U) {
+                auto frame_times = state.free_look_frame_times_ns;
+                std::ranges::sort(
+                    frame_times.begin(),
+                    frame_times.begin()
+                        + static_cast<std::ptrdiff_t>(state.free_look_frame_time_sample_count)
+                );
+
+                const auto percentile_index = [&state](std::size_t percentile) noexcept {
+                    const auto rank =
+                        (state.free_look_frame_time_sample_count * percentile + 99U) / 100U;
+                    return rank == 0U ? std::size_t{0} : rank - 1U;
+                };
+                std::println(
+                    "raster: {:.1f} FPS; frame p95 {:.2f} ms, p99 {:.2f} ms; target {:.2f} ms; scale 1/{}",
+                    fps,
+                    static_cast<double>(frame_times[percentile_index(95U)]) / 1.0e6,
+                    static_cast<double>(frame_times[percentile_index(99U)]) / 1.0e6,
+                    static_cast<double>(free_look_frame_budget_ns) / 1.0e6,
+                    state.free_look_resolution_divisor
+                );
+
+                state.free_look_frame_time_sample_count = 0U;
+                state.free_look_frame_time_sample_cursor = 0U;
+            } else {
+                std::println("raster: {:.1f} FPS", fps);
+            }
+
             state.frame_count = 0;
-            state.report_start_ns = now;
+            state.report_start_ns = report_now_ns;
         }
         return SDL_APP_CONTINUE;
     }
