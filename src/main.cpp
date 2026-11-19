@@ -1,19 +1,167 @@
 #define SDL_MAIN_USE_CALLBACKS
+#include <algorithm>
+#include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <numbers>
 #include <print>
 #include <ranges>
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
 
 #include "raster/memory/framebuffer.hpp"
+#include "raster/pipeline/rasterizer.hpp"
 #include "raster/platform/sdl3_presenter.hpp"
 
 namespace {
 
     constexpr std::size_t initial_width = 960;
     constexpr std::size_t initial_height = 540;
+
+    struct Rgb {
+        float r{};
+        float g{};
+        float b{};
+    };
+
+    [[nodiscard]]
+    std::uint32_t to_argb(const Rgb& rgb) noexcept {
+        const auto clamp_channel = [](float channel) noexcept {
+            return std::clamp(channel, 0.0F, 1.0F);
+        };
+
+        const auto red = static_cast<std::uint32_t>(std::lround(clamp_channel(rgb.r) * 255.0F));
+        const auto green = static_cast<std::uint32_t>(std::lround(clamp_channel(rgb.g) * 255.0F));
+        const auto blue = static_cast<std::uint32_t>(std::lround(clamp_channel(rgb.b) * 255.0F));
+        return 0xFF000000U | (red << 16U) | (green << 8U) | blue;
+    }
+
+    void draw_shaded_triangle(
+        raster::Framebuffer& framebuffer,
+        const raster::ScreenPoint& a,
+        const raster::ScreenPoint& b,
+        const raster::ScreenPoint& c,
+        const Rgb& color_a,
+        const Rgb& color_b,
+        const Rgb& color_c
+    ) noexcept {
+        auto triangle = raster::make_screen_triangle(a, b, c);
+        if (!triangle.has_value()) {
+            return;
+        }
+
+        auto color = framebuffer.color_view();
+        raster::rasterize_triangle(
+            *triangle,
+            framebuffer.width,
+            framebuffer.height,
+            [&](std::size_t x,
+                std::size_t y,
+                const raster::PixelBarycentrics& barycentrics) noexcept {
+            const Rgb shaded{
+                .r = color_a.r
+                    * barycentrics.l0
+                    + color_b.r
+                    * barycentrics.l1
+                    + color_c.r
+                    * barycentrics.l2,
+                .g = color_a.g
+                    * barycentrics.l0
+                    + color_b.g
+                    * barycentrics.l1
+                    + color_c.g
+                    * barycentrics.l2,
+                .b = color_a.b
+                    * barycentrics.l0
+                    + color_b.b
+                    * barycentrics.l1
+                    + color_c.b
+                    * barycentrics.l2,
+            };
+            color[y, x] = to_argb(shaded);
+        }
+        );
+    }
+
+    void render_scene(raster::Framebuffer& framebuffer, std::uint64_t elapsed_ns) noexcept {
+        const auto width = framebuffer.width;
+        const auto height = framebuffer.height;
+        if (width < 2 || height < 2) {
+            return;
+        }
+
+        std::ranges::fill(framebuffer.color_storage, 0xFF101018U);
+        std::array<float, 11> grid_x{};
+        std::array<float, 6> grid_y{};
+        for (const auto column : std::views::iota(std::size_t{0}, std::size_t{11})) {
+            grid_x[column] = static_cast<float>(column) * static_cast<float>(width) / 10.0F;
+        }
+        for (const auto row : std::views::iota(std::size_t{0}, std::size_t{6})) {
+            grid_y[row] = static_cast<float>(row) * static_cast<float>(height) / 5.0F;
+        }
+        const auto vertex_color = [](std::size_t column, std::size_t row) noexcept {
+            const auto u = static_cast<float>(column) / 10.0F;
+            const auto v = static_cast<float>(row) / 5.0F;
+            return Rgb{.r = u, .g = v, .b = 0.5F};
+        };
+
+        for (const auto row : std::views::iota(std::size_t{0}, std::size_t{5})) {
+            for (const auto column : std::views::iota(std::size_t{0}, std::size_t{10})) {
+                const raster::ScreenPoint top_left{.x = grid_x[column], .y = grid_y[row]};
+                const raster::ScreenPoint top_right{.x = grid_x[column + 1], .y = grid_y[row]};
+                const raster::ScreenPoint bottom_right{
+                    .x = grid_x[column + 1],
+                    .y = grid_y[row + 1],
+                };
+
+                const raster::ScreenPoint bottom_left{.x = grid_x[column], .y = grid_y[row + 1]};
+                const Rgb color_top_left = vertex_color(column, row);
+                const Rgb color_top_right = vertex_color(column + 1, row);
+                const Rgb color_bottom_right = vertex_color(column + 1, row + 1);
+                const Rgb color_bottom_left = vertex_color(column, row + 1);
+                draw_shaded_triangle(
+                    framebuffer,
+                    top_left,
+                    top_right,
+                    bottom_right,
+                    color_top_left,
+                    color_top_right,
+                    color_bottom_right
+                );
+                draw_shaded_triangle(
+                    framebuffer,
+                    top_left,
+                    bottom_right,
+                    bottom_left,
+                    color_top_left,
+                    color_bottom_right,
+                    color_bottom_left
+                );
+            }
+        }
+
+        // One spinning RGB triangle on top to keep the scene animated.
+        const auto theta = static_cast<float>(static_cast<double>(elapsed_ns) * 1.5e-9);
+        const auto center_x = static_cast<float>(width) * 0.5F;
+        const auto center_y = static_cast<float>(height) * 0.5F;
+        const auto radius = 0.35F * static_cast<float>(std::min(width, height));
+        const Rgb red{.r = 1.0F, .g = 0.0F, .b = 0.0F};
+        const Rgb green{.r = 0.0F, .g = 1.0F, .b = 0.0F};
+        const Rgb blue{.r = 0.0F, .g = 0.0F, .b = 1.0F};
+
+        std::array<raster::ScreenPoint, 3> spinner{};
+        for (const auto vertex : std::views::iota(std::size_t{0}, std::size_t{3})) {
+            const auto angle =
+                theta + static_cast<float>(vertex) * (2.0F * std::numbers::pi_v<float> / 3.0F);
+            spinner[vertex] = raster::ScreenPoint{
+                .x = center_x + radius * std::cos(angle),
+                .y = center_y + radius * std::sin(angle),
+            };
+        }
+        draw_shaded_triangle(framebuffer, spinner[0], spinner[1], spinner[2], red, green, blue);
+    }
 
     struct AppState {
         raster::Framebuffer framebuffer{initial_width, initial_height};
@@ -24,27 +172,6 @@ namespace {
         std::uint32_t stress_step{};
         bool auto_resize_test{};
     };
-
-    void fill_pattern(raster::Framebuffer& framebuffer, std::uint64_t elapsed_ns) noexcept {
-        const auto width = framebuffer.width;
-        const auto height = framebuffer.height;
-        if (width < 2 || height < 2) {
-            return;
-        }
-
-        auto color = framebuffer.color_view();
-        const auto shift = static_cast<std::size_t>((elapsed_ns / 10'000'000U) % 255U);
-        const auto x_range = std::views::iota(std::size_t{0}, width);
-        const auto y_range = std::views::iota(std::size_t{0}, height);
-        for (const auto [y, x] : std::views::cartesian_product(y_range, x_range)) {
-            const auto red = static_cast<std::uint32_t>((x * 255U / (width - 1U) + shift) % 256U);
-            const auto green = static_cast<std::uint32_t>(y * 255U / (height - 1U));
-            const auto blue = static_cast<std::uint32_t>(
-                ((x + y) * 255U / (width + height - 2U) + shift * 2U) % 256U
-            );
-            color[y, x] = 0xFF000000U | (red << 16U) | (green << 8U) | blue;
-        }
-    }
 } // namespace
 
 // NOLINTNEXTLINE(readability-identifier-naming)
@@ -164,7 +291,7 @@ SDL_AppResult SDLCALL SDL_AppIterate(void* appstate) {
     }
 
     const auto now = SDL_GetTicksNS();
-    fill_pattern(state.framebuffer, now - state.animation_start_ns);
+    render_scene(state.framebuffer, now - state.animation_start_ns);
     if (auto result = state.presenter.present(state.framebuffer); !result) {
         std::println(stderr, "raster: presentation failed ({})", static_cast<int>(result.error()));
         return SDL_APP_FAILURE;

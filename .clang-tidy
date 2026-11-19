@@ -46,6 +46,10 @@ Checks:
   - '-cert-dcl16-c'
   - '-cert-err58-cpp'                             # Twin of bugprone-throwing-static-initialization
 
+  # --- clang-analyzer ---
+  - '-clang-analyzer-optin.core.EnumCastOutOfRange' # Catch2's internal flag OR-combining casts produce
+                                                    # out-of-range-but-valid bit combinations.
+
   # --- misc ---
   - '-misc-const-correctness'                     # False-positive prone on template/mdspan views
   - '-misc-include-cleaner'                       # Too noisy with umbrella/ transitive STL headers

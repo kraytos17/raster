@@ -41,6 +41,12 @@ The first milestone displays an animated procedural gradient in an SDL3 resizabl
 window and reports presentation FPS. Close the window to exit. The framebuffer handles tile
 clearing and resizes while preserving 64-byte alignment.
 
+Milestone 2 replaces the gradient with a screen-space scene rasterized by the 28.4 fixed-point
+half-space rasterizer: the watertight 100-triangle mesh proven by the unit tests, vertex-colored
+from grid position, plus a spinning RGB triangle. `just test` covers the gate suite — watertight
+seam coverage, top-left fill-rule ownership, the exact barycentric partition, 64-bit overflow
+safety for triangles wider than 4096 pixels, and the fragment-callback concept contract.
+
 Run the automated resize/minimize/restore verification gate with
 `just preset=debug-sanitized resize-gate`: it drives the real SDL3 callbacks through several
 window resizes, a minimize/restore cycle, and a final size check using SDL's dummy video
