@@ -40,3 +40,8 @@ of compilation. Run `scripts/hooks-install.sh` to opt in to the staged C++ forma
 The first milestone displays an animated procedural gradient in an SDL3 resizable, high-DPI
 window and reports presentation FPS. Close the window to exit. The framebuffer handles tile
 clearing and resizes while preserving 64-byte alignment.
+
+Run the automated resize/minimize/restore verification gate with
+`just preset=debug-sanitized resize-gate`: it drives the real SDL3 callbacks through several
+window resizes, a minimize/restore cycle, and a final size check using SDL's dummy video
+driver, failing the app if the framebuffer does not track the window.

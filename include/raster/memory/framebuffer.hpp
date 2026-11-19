@@ -45,7 +45,6 @@ namespace raster {
             return static_cast<std::size_t>(-1) / sizeof(T);
         }
 
-        // NOLINTNEXTLINE
         template <typename U> struct rebind {
             using other = AlignedAllocator<U>;
         };
@@ -81,7 +80,7 @@ namespace raster {
 
         template <typename Self>
         [[nodiscard]]
-        auto color_view(this Self&& self) noexcept {
+        auto color_view(this Self& self) noexcept {
             using Element = std::conditional_t<
                 std::is_const_v<std::remove_reference_t<Self>>,
                 const std::uint32_t,
@@ -93,7 +92,7 @@ namespace raster {
 
         template <typename Self>
         [[nodiscard]]
-        auto depth_view(this Self&& self) noexcept {
+        auto depth_view(this Self& self) noexcept {
             using Element = std::
                 conditional_t<std::is_const_v<std::remove_reference_t<Self>>, const float, float>;
             auto* data = std::assume_aligned<cache_line_size>(self.depth_storage.data());
@@ -124,11 +123,13 @@ namespace raster {
             if (tile_x > width / tile_size || tile_y > height / tile_size) {
                 return;
             }
+
             const auto start_x = tile_x * tile_size;
             const auto start_y = tile_y * tile_size;
             if (start_x >= width || start_y >= height) {
                 return;
             }
+
             const auto end_x = std::min(start_x + tile_size, width);
             const auto end_y = std::min(start_y + tile_size, height);
             auto color = color_view();

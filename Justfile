@@ -72,6 +72,12 @@ workflow: (_need-preset 'configure' preset) (_need-preset 'test' preset)
 run *args: (_build preset 'raster')
     ./{{ build_dir }}/raster "$@"
 
+# Headless resize/minimize/restore verification gate driving the real SDL3
+# callbacks with the dummy video driver; fails the app if the framebuffer does
+# not track the final window size. Pair with debug-sanitized for the ASan gate.
+resize-gate: (_build preset 'raster')
+    RASTER_AUTO_RESIZE_TEST=1 SDL_VIDEODRIVER=dummy ./{{ build_dir }}/raster
+
 # Reformat all project C++ files.
 format: (_build preset 'format')
 

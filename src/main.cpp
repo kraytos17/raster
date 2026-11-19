@@ -21,6 +21,8 @@ namespace {
         std::uint64_t frame_count{};
         std::uint64_t report_start_ns{};
         std::uint64_t animation_start_ns{};
+        std::uint32_t stress_step{};
+        bool auto_resize_test{};
     };
 
     void fill_pattern(raster::Framebuffer& framebuffer, std::uint64_t elapsed_ns) noexcept {
@@ -66,6 +68,8 @@ SDL_AppResult SDLCALL SDL_AppInit(void** appstate, int, char*[]) {
         const auto now = SDL_GetTicksNS();
         state->report_start_ns = now;
         state->animation_start_ns = now;
+        state->auto_resize_test =
+            SDL_GetEnvironmentVariable(SDL_GetEnvironment(), "RASTER_AUTO_RESIZE_TEST") != nullptr;
         *appstate = state.release();
         return SDL_APP_CONTINUE;
     } catch (...) {
@@ -103,6 +107,58 @@ SDL_AppResult SDLCALL SDL_AppEvent(void* appstate, SDL_Event* event) {
 // NOLINTNEXTLINE(readability-identifier-naming)
 SDL_AppResult SDLCALL SDL_AppIterate(void* appstate) {
     auto& state = *static_cast<AppState*>(appstate);
+    if (state.auto_resize_test) {
+        switch (state.stress_step) {
+            case 0:
+                std::println("raster: stress: resize to 640x480");
+                SDL_SetWindowSize(state.presenter.window(), 640, 480);
+                break;
+            case 1:
+                std::println("raster: stress: resize to 1280x720");
+                SDL_SetWindowSize(state.presenter.window(), 1280, 720);
+                break;
+            case 2:
+                std::println("raster: stress: resize to 320x200");
+                SDL_SetWindowSize(state.presenter.window(), 320, 200);
+                break;
+            case 3:
+                std::println("raster: stress: minimize");
+                SDL_MinimizeWindow(state.presenter.window());
+                break;
+            case 4:
+                std::println("raster: stress: restore");
+                SDL_RestoreWindow(state.presenter.window());
+                break;
+            case 5:
+                std::println("raster: stress: resize to 1024x768");
+                SDL_SetWindowSize(state.presenter.window(), 1024, 768);
+                break;
+            case 6:
+                if (auto result = state.presenter.resize_to_window_pixels(state.framebuffer);
+                    !result) {
+                    std::println(
+                        stderr,
+                        "raster: stress: final resize failed ({})",
+                        static_cast<int>(result.error())
+                    );
+                    return SDL_APP_FAILURE;
+                }
+
+                std::println(
+                    "raster: stress complete — framebuffer {}x{}",
+                    state.framebuffer.width,
+                    state.framebuffer.height
+                );
+                if (state.framebuffer.width != 1024U || state.framebuffer.height != 768U) {
+                    std::println(stderr, "raster: stress: framebuffer did not reach 1024x768");
+                    return SDL_APP_FAILURE;
+                }
+                return SDL_APP_SUCCESS;
+            default:
+                break;
+        }
+        ++state.stress_step;
+    }
     if (state.presenter.is_minimized()) {
         return SDL_APP_CONTINUE;
     }

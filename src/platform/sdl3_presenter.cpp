@@ -60,6 +60,7 @@ namespace raster {
                 / sizeof(std::uint32_t)) {
                 return std::unexpected{PresenterError::InvalidPixelSize};
             }
+
             SDLTexturePtr new_texture{SDL_CreateTexture(
                 renderer_.get(),
                 SDL_PIXELFORMAT_ARGB8888,

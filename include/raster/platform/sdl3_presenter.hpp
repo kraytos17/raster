@@ -78,10 +78,12 @@ namespace raster {
             int height,
             Framebuffer& framebuffer
         ) noexcept;
+
         [[nodiscard]]
         std::expected<void, PresenterError> resize_to_window_pixels(
             Framebuffer& framebuffer
         ) noexcept;
+
         [[nodiscard]]
         std::expected<void, PresenterError> present(const Framebuffer& framebuffer) const noexcept;
 
@@ -92,6 +94,11 @@ namespace raster {
         [[nodiscard]]
         bool is_minimized() const noexcept {
             return minimized_;
+        }
+
+        [[nodiscard]]
+        SDL_Window* window() const noexcept {
+            return window_.get();
         }
 
     private:

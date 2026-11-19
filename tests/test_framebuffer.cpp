@@ -1,21 +1,28 @@
 #include <catch2/catch_test_macros.hpp>
-#include <cstddef>
 #include <cstdint>
-#include <memory>
 #include <type_traits>
 
 #include "raster/memory/framebuffer.hpp"
 
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wc2y-extensions"
+#endif
+
 namespace {
 
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions)
     TEST_CASE("framebuffer storage is cache-line aligned", "[framebuffer][memory]") {
         const raster::Framebuffer framebuffer{16, 8};
 
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast): inspect pointer alignment.
         REQUIRE(reinterpret_cast<std::uintptr_t>(framebuffer.color_storage.data()) % 64U == 0U);
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast): inspect pointer alignment.
         REQUIRE(reinterpret_cast<std::uintptr_t>(framebuffer.depth_storage.data()) % 64U == 0U);
         STATIC_REQUIRE(alignof(raster::AlignedAllocator<std::uint32_t>) <= 64);
     }
 
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions)
     TEST_CASE("framebuffer views preserve constness", "[framebuffer][mdspan]") {
         raster::Framebuffer framebuffer{3, 2};
         auto mutable_color = framebuffer.color_view();
@@ -43,6 +50,7 @@ namespace {
         REQUIRE(const_depth[1, 2] == 0.25F);
     }
 
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions)
     TEST_CASE("framebuffer resize is safe and re-aligns backing storage", "[framebuffer][resize]") {
         raster::Framebuffer framebuffer{3, 2};
         framebuffer.color_view()[1, 2] = 0xFF123456U;
@@ -52,7 +60,9 @@ namespace {
         REQUIRE(framebuffer.height == 7);
         REQUIRE(framebuffer.color_storage.size() == 91);
         REQUIRE(framebuffer.depth_storage.size() == 91);
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast): verify resize alignment.
         REQUIRE(reinterpret_cast<std::uintptr_t>(framebuffer.color_storage.data()) % 64U == 0U);
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast): verify resize alignment.
         REQUIRE(reinterpret_cast<std::uintptr_t>(framebuffer.depth_storage.data()) % 64U == 0U);
         REQUIRE(framebuffer.color_view()[6, 12] == 0xFF000000U);
         REQUIRE(framebuffer.depth_view()[6, 12] == 0.0F);
@@ -62,6 +72,7 @@ namespace {
         REQUIRE(framebuffer.height == 7);
     }
 
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions)
     TEST_CASE("clear_tile clears only its framebuffer tile", "[framebuffer][clear]") {
         raster::Framebuffer framebuffer{18, 17};
         framebuffer.clear_tile(1, 1, 0xFFAABBCCU, 0.75F);
@@ -75,6 +86,7 @@ namespace {
         REQUIRE(color[0, 0] == 0xFF000000U);
     }
 
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions)
     TEST_CASE("clear_tile ignores tiles outside framebuffer extent", "[framebuffer][clear]") {
         raster::Framebuffer framebuffer{18, 17};
         framebuffer.color_view()[16, 16] = 0xFFAABBCCU;
@@ -86,3 +98,7 @@ namespace {
     }
 
 } // namespace
+
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
