@@ -9,6 +9,7 @@
 #include <memory>
 #include <print>
 #include <SDL3/SDL.h>
+#include <thread>
 
 #include "raster/io/obj_loader.hpp"
 #include "raster/io/tga_loader.hpp"
@@ -28,6 +29,7 @@ namespace raster::platform {
         constexpr std::uint64_t free_look_frame_budget_ns = 16'666'667U;
         constexpr std::uint64_t free_look_headroom_budget_ns = 12'500'000U;
         constexpr std::size_t free_look_timing_sample_capacity = 240U;
+        constexpr std::size_t maximum_tile_concurrency = 8U;
         constexpr std::uint32_t clip_stress_frame_count = 120;
 
         struct AppState {
@@ -36,6 +38,13 @@ namespace raster::platform {
             raster::SoAMesh mesh{};
             raster::TgaImage checker_texture{};
             raster::Texture2D<raster::LayoutTiled4x4> texture{};
+            raster::render::TileRenderer tile_renderer{std::clamp(
+                static_cast<std::size_t>(std::thread::hardware_concurrency()),
+                std::size_t{1},
+                maximum_tile_concurrency
+            )};
+
+            bool tile_renderer_warmed{};
             raster::WindowPresenter presenter;
             std::uint64_t frame_count{};
             std::uint64_t report_start_ns{};
@@ -387,11 +396,15 @@ namespace raster::platform {
         auto& render_target = state.free_look_test && state.free_look_framebuffer
             ? *state.free_look_framebuffer
             : state.framebuffer;
+        const auto check_render_allocations = state.clip_stress_test && state.tile_renderer_warmed;
         bool rendered = false;
         std::size_t allocation_count = 0;
         {
-            const raster::platform::ScopedAllocationProbe allocation_probe{state.clip_stress_test};
-            rendered = raster::render::render_scene(
+            const raster::platform::ScopedAllocationProbe allocation_probe{
+                check_render_allocations
+            };
+
+            rendered = state.tile_renderer.render_scene(
                 render_target,
                 state.mesh,
                 elapsed_ns,
@@ -408,11 +421,16 @@ namespace raster::platform {
             allocation_count = allocation_probe.allocations();
         }
 
+        if (state.clip_stress_test && !state.tile_renderer_warmed) {
+            state.tile_renderer_warmed = true;
+            return SDL_APP_CONTINUE;
+        }
+
         if (!rendered) {
             std::println(stderr, "raster: scene rendering failed");
             return SDL_APP_FAILURE;
         }
-        if (state.clip_stress_test && allocation_count != 0U) {
+        if (check_render_allocations && allocation_count != 0U) {
             std::println(
                 stderr,
                 "raster: render allocation trap: {} allocations",

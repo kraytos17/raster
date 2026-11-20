@@ -49,6 +49,13 @@ namespace raster {
         std::uint32_t visible_mask{};
     };
 
+    struct RasterRegion {
+        std::size_t min_x{};
+        std::size_t min_y{};
+        std::size_t max_x{static_cast<std::size_t>(-1)};
+        std::size_t max_y{static_cast<std::size_t>(-1)};
+    };
+
     // Contract for the per-pixel fragment callback handed to
     // rasterize_triangle: invocable as an lvalue (the rasterizer always calls
     // its local copy) with the covered pixel coordinates and the unbiased
@@ -248,7 +255,8 @@ namespace raster {
         std::size_t viewport_width,
         std::size_t viewport_height,
         std::optional<std::mdspan<float, Extents2D>> depth_view,
-        Fragment&& fragment
+        Fragment&& fragment,
+        const RasterRegion& region = {}
     ) noexcept {
         rasterize_triangle_quads(
             triangle,
@@ -266,7 +274,8 @@ namespace raster {
                 }
                 fragment_callback(quad_x + (lane & 1U), quad_y + (lane >> 1U), quad.lanes[lane]);
             }
-        }
+        },
+            region
         );
     }
 
@@ -281,7 +290,8 @@ namespace raster {
             viewport_width,
             viewport_height,
             std::nullopt,
-            std::forward<Fragment>(fragment)
+            std::forward<Fragment>(fragment),
+            {}
         );
     }
 
@@ -290,23 +300,44 @@ namespace raster {
         std::size_t viewport_width,
         std::size_t viewport_height,
         std::optional<std::mdspan<float, Extents2D>> depth_view,
-        Fragment&& fragment
+        Fragment&& fragment,
+        const RasterRegion& region = {}
     ) noexcept {
         const auto viewport_max_x = static_cast<std::int32_t>(viewport_width);
         const auto viewport_max_y = static_cast<std::int32_t>(viewport_height);
-        const std::int32_t x_begin = std::max(triangle.min_x, static_cast<std::int32_t>(0));
-        const std::int32_t y_begin = std::max(triangle.min_y, static_cast<std::int32_t>(0));
-        const std::int32_t x_end = std::min(triangle.max_x, viewport_max_x);
-        const std::int32_t y_end = std::min(triangle.max_y, viewport_max_y);
+        const std::int32_t x_begin = std::max({
+            triangle.min_x,
+            static_cast<std::int32_t>(0),
+            static_cast<std::int32_t>(std::min(region.min_x, viewport_width)),
+        });
+        const std::int32_t y_begin = std::max({
+            triangle.min_y,
+            static_cast<std::int32_t>(0),
+            static_cast<std::int32_t>(std::min(region.min_y, viewport_height)),
+        });
+        const std::int32_t x_end = std::min({
+            triangle.max_x,
+            viewport_max_x,
+            static_cast<std::int32_t>(std::min(region.max_x, viewport_width)),
+        });
+        const std::int32_t y_end = std::min({
+            triangle.max_y,
+            viewport_max_y,
+            static_cast<std::int32_t>(std::min(region.max_y, viewport_height)),
+        });
         if (x_begin >= x_end || y_begin >= y_end) {
             return;
         }
 
         Fragment fragment_callback = std::forward<Fragment>(fragment);
+        // Align quads to the framebuffer's even pixel grid so a triangle can be
+        // split across tile boundaries without changing helper-lane derivatives.
+        const auto quad_x_begin = detail::floor_div(x_begin, 2) * 2;
+        const auto quad_y_begin = detail::floor_div(y_begin, 2) * 2;
         // Advance the row-start accumulators from the unclamped box origin to
-        // the clamped one without re-evaluating the edge functions.
-        const std::int64_t column_offset = static_cast<std::int64_t>(x_begin - triangle.min_x);
-        const std::int64_t row_offset = static_cast<std::int64_t>(y_begin - triangle.min_y);
+        // the first globally aligned quad without re-evaluating edge functions.
+        const std::int64_t column_offset = static_cast<std::int64_t>(quad_x_begin - triangle.min_x);
+        const std::int64_t row_offset = static_cast<std::int64_t>(quad_y_begin - triangle.min_y);
         std::array<std::int64_t, 3> row_accumulator{};
         for (const auto edge_index : std::views::iota(std::size_t{0}, std::size_t{3})) {
             row_accumulator[edge_index] = triangle.row_start[edge_index]
@@ -315,10 +346,10 @@ namespace raster {
                 + triangle.step_y[edge_index]
                 * row_offset;
         }
-        for (std::int32_t quad_y = y_begin; quad_y < y_end; quad_y += 2) {
+        for (std::int32_t quad_y = quad_y_begin; quad_y < y_end; quad_y += 2) {
             const std::int32_t quad_height = std::min(static_cast<std::int32_t>(2), y_end - quad_y);
             std::array<std::int64_t, 3> quad_accumulator = row_accumulator;
-            for (std::int32_t quad_x = x_begin; quad_x < x_end; quad_x += 2) {
+            for (std::int32_t quad_x = quad_x_begin; quad_x < x_end; quad_x += 2) {
                 const std::int32_t quad_width =
                     std::min(static_cast<std::int32_t>(2), x_end - quad_x);
                 std::uint32_t coverage_mask = 0;

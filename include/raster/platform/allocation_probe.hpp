@@ -3,8 +3,8 @@
 #include <cstddef>
 
 namespace raster::platform {
-    // Counts C++ global allocation calls made by the current thread while the
-    // probe is active. Intended for diagnostics/tests.
+    // Counts C++ global allocation calls from every thread while the probe is
+    // active. Intended for diagnostics/tests around parallel render work.
     class ScopedAllocationProbe {
     public:
 

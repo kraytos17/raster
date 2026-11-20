@@ -1,13 +1,17 @@
 #include <algorithm>
+#include <atomic>
 #include <catch2/catch_test_macros.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <mdspan>
 #include <ranges>
+#include <span>
 #include <vector>
 
 #include "raster/math/barycentric.hpp"
 #include "raster/pipeline/rasterizer.hpp"
+#include "raster/pipeline/tile_binner.hpp"
+#include "raster/pipeline/tile_executor.hpp"
 
 #if defined(__clang__)
 #pragma clang diagnostic push
@@ -15,6 +19,163 @@
 #endif
 
 namespace {
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE("tile executor processes each tile once across repeated frames", "[tile][executor]") {
+        raster::TileExecutor executor{3U};
+        std::vector<std::atomic_size_t> visits(257U);
+
+        executor.execute(visits.size(), [&visits](std::size_t tile) noexcept {
+            visits[tile].fetch_add(1U, std::memory_order_relaxed);
+        });
+        REQUIRE(std::ranges::all_of(visits, [](const auto& count) {
+            return count.load(std::memory_order_relaxed) == 1U;
+        }));
+
+        for (auto& count : visits) {
+            count.store(0U, std::memory_order_relaxed);
+        }
+        executor.execute(visits.size(), [&visits](std::size_t tile) noexcept {
+            visits[tile].fetch_add(1U, std::memory_order_relaxed);
+        });
+        REQUIRE(std::ranges::all_of(visits, [](const auto& count) {
+            return count.load(std::memory_order_relaxed) == 1U;
+        }));
+
+        executor.execute(0U, [&visits](std::size_t tile) noexcept {
+            visits[tile].fetch_add(1U, std::memory_order_relaxed);
+        });
+        REQUIRE(std::ranges::all_of(visits, [](const auto& count) {
+            return count.load(std::memory_order_relaxed) == 1U;
+        }));
+    }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE("tile executor runs safely without background workers", "[tile][executor]") {
+        raster::TileExecutor executor{0U};
+        std::vector<std::atomic_size_t> visits(17U);
+
+        executor.execute(visits.size(), [&visits](std::size_t tile) noexcept {
+            visits[tile].fetch_add(1U, std::memory_order_relaxed);
+        });
+        REQUIRE(std::ranges::all_of(visits, [](const auto& count) {
+            return count.load(std::memory_order_relaxed) == 1U;
+        }));
+    }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE("single-thread tile executor handles a frame", "[tile][executor]") {
+        raster::TileExecutor executor{1U};
+        std::vector<std::atomic_size_t> visits(17U);
+
+        executor.execute(visits.size(), [&visits](std::size_t tile) noexcept {
+            visits[tile].fetch_add(1U, std::memory_order_relaxed);
+        });
+        REQUIRE(std::ranges::all_of(visits, [](const auto& count) {
+            return count.load(std::memory_order_relaxed) == 1U;
+        }));
+    }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE("tile bins contain overlapping triangles once in input order", "[tile][binning]") {
+        const std::array<raster::ScreenTriangle, 5> triangles{
+            raster::ScreenTriangle{.min_x = 1, .min_y = 1, .max_x = 20, .max_y = 18},
+            raster::ScreenTriangle{.min_x = 10, .min_y = 0, .max_x = 32, .max_y = 16},
+            raster::ScreenTriangle{.min_x = 17, .min_y = 17, .max_x = 18, .max_y = 18},
+            raster::ScreenTriangle{.min_x = -20, .min_y = -20, .max_x = -1, .max_y = -1},
+            raster::ScreenTriangle{.min_x = 32, .min_y = 0, .max_x = 33, .max_y = 1},
+        };
+
+        raster::TileBins bins{};
+        raster::bin_triangles(triangles, 33U, 19U, bins);
+        REQUIRE(bins.tile_columns() == 3U);
+        REQUIRE(bins.tile_rows() == 2U);
+        REQUIRE(bins.tile_count() == 6U);
+        REQUIRE(std::ranges::equal(bins.triangle_indices(0U), std::array<std::size_t, 2>{0U, 1U}));
+        REQUIRE(std::ranges::equal(bins.triangle_indices(1U), std::array<std::size_t, 2>{0U, 1U}));
+        REQUIRE(std::ranges::equal(bins.triangle_indices(2U), std::array<std::size_t, 1>{4U}));
+        REQUIRE(std::ranges::equal(bins.triangle_indices(3U), std::array<std::size_t, 1>{0U}));
+        REQUIRE(std::ranges::equal(bins.triangle_indices(4U), std::array<std::size_t, 2>{0U, 2U}));
+        REQUIRE(bins.triangle_indices(5U).empty());
+        REQUIRE(bins.triangle_indices(bins.tile_count()).empty());
+
+        const auto* const retained_storage = bins.triangle_indices(0U).data();
+        raster::bin_triangles(triangles, 33U, 19U, bins);
+        REQUIRE(bins.triangle_indices(0U).data() == retained_storage);
+        REQUIRE(std::ranges::equal(bins.triangle_indices(0U), std::array<std::size_t, 2>{0U, 1U}));
+    }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE(
+        "tile raster regions preserve global quad coverage and helper lanes", "[tile][rasterizer]"
+    ) {
+        constexpr std::size_t width = 40U;
+        constexpr std::size_t height = 24U;
+        const auto triangle = raster::make_screen_triangle(
+            raster::ScreenPoint{.x = 2.0F, .y = 1.0F},
+            raster::ScreenPoint{.x = 36.0F, .y = 3.0F},
+            raster::ScreenPoint{.x = 8.0F, .y = 22.0F}
+        );
+        REQUIRE(triangle.has_value());
+
+        std::vector<std::uint32_t> serial(width * height, 0U);
+        std::vector<std::uint32_t> tiled(width * height, 0U);
+        const auto serial_view = std::mdspan<std::uint32_t, raster::Extents2D>{
+            serial.data(),
+            height,
+            width,
+        };
+        const auto tiled_view = std::mdspan<std::uint32_t, raster::Extents2D>{
+            tiled.data(),
+            height,
+            width,
+        };
+        raster::rasterize_triangle_quads(
+            *triangle,
+            width,
+            height,
+            [&](std::size_t x, std::size_t y, const raster::QuadBarycentrics& quad) noexcept {
+            for (const auto lane : std::views::iota(std::size_t{0}, std::size_t{4})) {
+                if ((quad.visible_mask & (1U << lane)) != 0U) {
+                    const auto px = x + (lane & 1U);
+                    const auto py = y + (lane >> 1U);
+                    serial_view[py, px] = 1U;
+                }
+            }
+        }
+        );
+        for (std::size_t tile_y = 0U; tile_y < 2U; ++tile_y) {
+            for (std::size_t tile_x = 0U; tile_x < 3U; ++tile_x) {
+                const raster::RasterRegion region{
+                    .min_x = tile_x * raster::raster_tile_size,
+                    .min_y = tile_y * raster::raster_tile_size,
+                    .max_x = std::min((tile_x + 1U) * raster::raster_tile_size, width),
+                    .max_y = std::min((tile_y + 1U) * raster::raster_tile_size, height),
+                };
+                raster::rasterize_triangle_quads(
+                    *triangle,
+                    width,
+                    height,
+                    std::nullopt,
+                    [&](std::size_t x,
+                        std::size_t y,
+                        const raster::QuadBarycentrics& quad) noexcept {
+                    for (const auto lane : std::views::iota(std::size_t{0}, std::size_t{4})) {
+                        if ((quad.visible_mask & (1U << lane)) != 0U) {
+                            const auto px = x + (lane & 1U);
+                            const auto py = y + (lane >> 1U);
+                            ++tiled_view[py, px];
+                        }
+                    }
+                },
+                    region
+                );
+            }
+        }
+
+        REQUIRE(tiled == serial);
+        REQUIRE(std::ranges::all_of(tiled, [](std::uint32_t count) { return count <= 1U; }));
+    }
+
     // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
     TEST_CASE("fragment callback contract is enforced at compile time", "[rasterizer][concept]") {
         const auto valid_fragment =

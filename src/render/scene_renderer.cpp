@@ -9,6 +9,7 @@
 #include <ranges>
 #include <span>
 #include <tuple>
+#include <vector>
 
 #include "raster/math/mat.hpp"
 #include "raster/math/vec.hpp"
@@ -16,6 +17,8 @@
 #include "raster/pipeline/clipper.hpp"
 #include "raster/pipeline/rasterizer.hpp"
 #include "raster/pipeline/shader.hpp"
+#include "raster/pipeline/tile_binner.hpp"
+#include "raster/pipeline/tile_executor.hpp"
 
 namespace raster::render {
     namespace {
@@ -270,7 +273,214 @@ namespace raster::render {
             }
             return true;
         }
+
+        template <typename Layout> struct PreparedTriangle {
+            ScreenTriangle setup{};
+            std::array<typename FloorShader<Layout>::Varyings, 3> vertices{};
+        };
+
+        template <typename Layout> [[nodiscard]]
+        bool prepare_mesh(
+            FloorShader<Layout>& shader,
+            const SoAMesh& mesh,
+            std::size_t width,
+            std::size_t height,
+            bool guard_band_test,
+            std::vector<PreparedTriangle<Layout>>& prepared
+        ) noexcept {
+            prepared.clear();
+            for (const auto triangle_index :
+                 std::views::iota(std::size_t{0}, mesh.triangle_count())) {
+                const auto index_base = triangle_index * 3U;
+                const auto vertex_a = static_cast<std::size_t>(mesh.indices[index_base]);
+                const auto vertex_b = static_cast<std::size_t>(mesh.indices[index_base + 1U]);
+                const auto vertex_c = static_cast<std::size_t>(mesh.indices[index_base + 2U]);
+                const auto varying_a = shader.vertex(mesh.positions[vertex_a], mesh.uvs[vertex_a]);
+                const auto varying_b = shader.vertex(mesh.positions[vertex_b], mesh.uvs[vertex_b]);
+                const auto varying_c = shader.vertex(mesh.positions[vertex_c], mesh.uvs[vertex_c]);
+                const auto clipped = guard_band_test
+                    ? clip_triangle_guard_band(shader, varying_a, varying_b, varying_c, 2.0F)
+                    : clip_triangle(shader, varying_a, varying_b, varying_c);
+                if (!clipped) {
+                    return false;
+                }
+                for (const auto& clipped_triangle :
+                     std::span{clipped->triangles.data(), clipped->size}) {
+                    const std::array<typename FloorShader<Layout>::Varyings, 3> vertices{
+                        clipped_triangle.vertices[0],
+                        clipped_triangle.vertices[1],
+                        clipped_triangle.vertices[2],
+                    };
+                    const std::array<float, 3> inverse_w{
+                        1.0F / vertices[0].clip_pos.w,
+                        1.0F / vertices[1].clip_pos.w,
+                        1.0F / vertices[2].clip_pos.w,
+                    };
+                    const std::array<float, 3> reverse_z{
+                        vertices[0].clip_pos.z * inverse_w[0],
+                        vertices[1].clip_pos.z * inverse_w[1],
+                        vertices[2].clip_pos.z * inverse_w[2],
+                    };
+                    const auto setup = make_screen_triangle(
+                        viewport_to_screen(
+                            vertices[0].clip_pos.x * inverse_w[0],
+                            vertices[0].clip_pos.y * inverse_w[0],
+                            width,
+                            height
+                        ),
+                        viewport_to_screen(
+                            vertices[1].clip_pos.x * inverse_w[1],
+                            vertices[1].clip_pos.y * inverse_w[1],
+                            width,
+                            height
+                        ),
+                        viewport_to_screen(
+                            vertices[2].clip_pos.x * inverse_w[2],
+                            vertices[2].clip_pos.y * inverse_w[2],
+                            width,
+                            height
+                        ),
+                        inverse_w,
+                        reverse_z
+                    );
+                    if (setup) {
+                        prepared.push_back(
+                            PreparedTriangle<Layout>{.setup = *setup, .vertices = vertices}
+                        );
+                    }
+                }
+            }
+            return true;
+        }
+
+        template <typename Layout> void rasterize_prepared_triangle(
+            Framebuffer& framebuffer,
+            FloorShader<Layout>& shader,
+            const PreparedTriangle<Layout>& triangle,
+            const RasterRegion& region
+        ) noexcept {
+            const auto color = framebuffer.color_view();
+            const auto varying_a = triangle.vertices[0];
+            const auto varying_b = triangle.vertices[1];
+            const auto varying_c = triangle.vertices[2];
+            rasterize_triangle_quads(
+                triangle.setup,
+                framebuffer.width,
+                framebuffer.height,
+                framebuffer.depth_view(),
+                [&](std::size_t quad_x, std::size_t quad_y, const QuadBarycentrics& quad) noexcept {
+                std::array<Vec2f, 4> quad_uv{};
+                for (const auto lane : std::views::iota(std::size_t{0}, std::size_t{4})) {
+                    const auto attributes =
+                        shader.interpolate(varying_a, varying_b, varying_c, quad.lanes[lane]);
+                    quad_uv[lane] = std::get<0>(attributes);
+                }
+
+                const auto derivatives = quad_derivatives(quad_uv);
+                const auto lod = mip_lod(
+                    derivatives,
+                    shader.uniforms.texture->width(),
+                    shader.uniforms.texture->height()
+                );
+                for (const auto lane : std::views::iota(std::size_t{0}, std::size_t{4})) {
+                    if ((quad.visible_mask & (1U << lane)) == 0U) {
+                        continue;
+                    }
+
+                    const auto x = quad_x + (lane & 1U);
+                    const auto y = quad_y + (lane >> 1U);
+                    const auto shaded = shader.fragment(
+                        typename FloorShader<Layout>::Varyings{
+                            .clip_pos = varying_a.clip_pos,
+                            .uv = quad_uv[lane],
+                            .mip_lod = lod,
+                        }
+                    );
+                    color[y, x] = to_argb(Rgb{.r = shaded.x, .g = shaded.y, .b = shaded.z});
+                }
+            },
+                region
+            );
+        }
+
+        template <typename Layout> struct TileRenderState {
+            explicit TileRenderState(std::size_t concurrency) :
+                executor{concurrency} {}
+
+            void reserve(std::size_t width, std::size_t height, std::size_t mesh_triangle_count) {
+                const auto columns = width
+                    / raster_tile_size
+                    + static_cast<std::size_t>(width % raster_tile_size != 0U);
+                const auto rows = height
+                    / raster_tile_size
+                    + static_cast<std::size_t>(height % raster_tile_size != 0U);
+                const auto tile_count = columns * rows;
+
+                prepared.reserve(mesh_triangle_count * 8U);
+                setups.reserve(mesh_triangle_count * 8U);
+                bins.reserve(tile_count, tile_count * 8U);
+            }
+
+            TileExecutor executor;
+            TileBins bins{};
+            std::vector<PreparedTriangle<Layout>> prepared{};
+            std::vector<ScreenTriangle> setups{};
+        };
+
+        template <typename Layout> [[nodiscard]]
+        bool draw_tiled_mesh(
+            Framebuffer& framebuffer,
+            FloorShader<Layout>& shader,
+            const SoAMesh& mesh,
+            bool guard_band_test,
+            TileRenderState<Layout>& tile_state,
+            bool allow_allocation
+        ) noexcept {
+            const auto width = framebuffer.width;
+            const auto height = framebuffer.height;
+            if (allow_allocation) {
+                tile_state.reserve(width, height, mesh.triangle_count());
+            }
+            if (!prepare_mesh(shader, mesh, width, height, guard_band_test, tile_state.prepared)) {
+                return false;
+            }
+
+            tile_state.setups.clear();
+            tile_state.setups.reserve(tile_state.prepared.size());
+            for (const auto& prepared : tile_state.prepared) {
+                tile_state.setups.push_back(prepared.setup);
+            }
+
+            bin_triangles(tile_state.setups, width, height, tile_state.bins);
+            tile_state.executor.execute(
+                tile_state.bins.tile_count(),
+                [&](std::size_t tile) noexcept {
+                const auto tile_x = tile % tile_state.bins.tile_columns();
+                const auto tile_y = tile / tile_state.bins.tile_columns();
+                const RasterRegion region{
+                    .min_x = tile_x * raster_tile_size,
+                    .min_y = tile_y * raster_tile_size,
+                    .max_x = std::min((tile_x + 1U) * raster_tile_size, width),
+                    .max_y = std::min((tile_y + 1U) * raster_tile_size, height),
+                };
+                for (const auto triangle_index : tile_state.bins.triangle_indices(tile)) {
+                    rasterize_prepared_triangle(
+                        framebuffer,
+                        shader,
+                        tile_state.prepared[triangle_index],
+                        region
+                    );
+                }
+            }
+            );
+            return true;
+        }
     } // namespace
+
+    struct TileRenderer::Impl : TileRenderState<LayoutTiled4x4> {
+        explicit Impl(std::size_t concurrency) :
+            TileRenderState<LayoutTiled4x4>{concurrency} {}
+    };
 
     template <typename Layout> [[nodiscard]]
     bool render_scene_impl(
@@ -283,7 +493,8 @@ namespace raster::render {
         bool solid_color_debug,
         const Texture2D<Layout>& texture,
         const FreeLookCamera& camera,
-        bool draw_overlay
+        bool draw_overlay,
+        TileRenderState<Layout>* tile_state = nullptr
     ) noexcept {
         const auto width = framebuffer.width;
         const auto height = framebuffer.height;
@@ -346,8 +557,21 @@ namespace raster::render {
         shader.uniforms.model_view_projection = projection * view;
         shader.uniforms.texture = &texture;
         shader.uniforms.solid_color_debug = solid_color_debug;
-        if (!draw_mesh(framebuffer, shader, mesh, guard_band_test)) {
-            return false;
+        if (tile_state != nullptr) {
+            if (!draw_tiled_mesh(
+                    framebuffer,
+                    shader,
+                    mesh,
+                    guard_band_test,
+                    *tile_state,
+                    !clip_stress_test || elapsed_ns == 0U
+                )) {
+                return false;
+            }
+        } else {
+            if (!draw_mesh(framebuffer, shader, mesh, guard_band_test)) {
+                return false;
+            }
         }
         if (!draw_overlay || clip_stress_test || free_look_test) {
             return true;
@@ -396,6 +620,39 @@ namespace raster::render {
             texture,
             camera,
             true
+        );
+    }
+
+    TileRenderer::TileRenderer(std::size_t concurrency) :
+        impl_{std::make_unique<Impl>(concurrency)} {}
+
+    TileRenderer::TileRenderer(TileRenderer&&) noexcept = default;
+    TileRenderer& TileRenderer::operator=(TileRenderer&&) noexcept = default;
+    TileRenderer::~TileRenderer() = default;
+
+    bool TileRenderer::render_scene(
+        Framebuffer& framebuffer,
+        const SoAMesh& mesh,
+        std::uint64_t elapsed_ns,
+        bool clip_stress_test,
+        bool free_look_test,
+        bool guard_band_test,
+        bool solid_color_debug,
+        const Texture2D<LayoutTiled4x4>& texture,
+        const FreeLookCamera& camera
+    ) noexcept {
+        return render_scene_impl(
+            framebuffer,
+            mesh,
+            elapsed_ns,
+            clip_stress_test,
+            free_look_test,
+            guard_band_test,
+            solid_color_debug,
+            texture,
+            camera,
+            true,
+            impl_.get()
         );
     }
 

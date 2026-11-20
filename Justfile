@@ -99,6 +99,10 @@ texture-benchmark: (_build preset 'raster_texture_benchmark')
 texture-benchmark-scene *args: (_build preset 'raster_texture_benchmark')
     ./{{ build_dir }}/raster_texture_benchmark scene {{ args }}
 
+# Compare serial and persistent tiled rendering at several worker counts.
+texture-benchmark-threads: (_build preset 'raster_texture_benchmark')
+    ./{{ build_dir }}/raster_texture_benchmark scene-threads
+
 # Reformat all project C++ files.
 format: (_build preset 'format')
 
@@ -111,6 +115,10 @@ cppcheck: (_build preset 'cppcheck')
 # Run clang-tidy and the tests using the dedicated Clang preset.
 tidy:
     cmake --workflow --preset tidy
+
+# Run ThreadSanitizer on the multithreaded tile renderer.
+tsan:
+    cmake --workflow --preset thread-sanitized
 
 # Full local quality gate: format, cppcheck, clang-tidy, and sanitized tests.
 verify: check-format cppcheck tidy

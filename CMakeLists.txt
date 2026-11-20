@@ -66,6 +66,8 @@ target_sources(raster_engine INTERFACE
         include/raster/memory/texture_layout.hpp
         include/raster/pipeline/clipper.hpp
         include/raster/pipeline/rasterizer.hpp
+        include/raster/pipeline/tile_binner.hpp
+        include/raster/pipeline/tile_executor.hpp
         include/raster/pipeline/shader.hpp
         include/raster/platform/sdl3_presenter.hpp
         include/raster/platform/allocation_probe.hpp
@@ -132,6 +134,7 @@ if(RASTER_BUILD_TESTS)
         tests/test_scene.cpp
         tests/test_texture.cpp
         tests/test_shader.cpp
+        src/platform/allocation_probe.cpp
         src/render/scene_renderer.cpp
     )
     target_compile_definitions(raster_tests PRIVATE RASTER_ASSET_DIR="${PROJECT_SOURCE_DIR}/assets")

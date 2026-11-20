@@ -31,6 +31,15 @@
       }
     },
     {
+      "name": "thread-sanitized",
+      "inherits": "gcc-base",
+      "displayName": "Debug + ThreadSanitizer (GCC)",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "RASTER_ENABLE_TSAN": "ON"
+      }
+    },
+    {
       "name": "release-native",
       "inherits": "gcc-base",
       "displayName": "Release + Native + LTO (GCC)",
@@ -72,6 +81,7 @@
   ],
   "buildPresets": [
     { "name": "debug-sanitized", "configurePreset": "debug-sanitized", "jobs": 0 },
+    { "name": "thread-sanitized", "configurePreset": "thread-sanitized", "jobs": 0 },
     { "name": "release-native", "configurePreset": "release-native", "jobs": 0 },
     { "name": "profile-telemetry", "configurePreset": "profile-telemetry", "jobs": 0 },
     { "name": "tidy", "configurePreset": "tidy", "jobs": 0 },
@@ -84,6 +94,7 @@
       "output": { "outputOnFailure": true }
     },
     { "name": "debug-sanitized", "configurePreset": "debug-sanitized", "inherits": "test-base" },
+    { "name": "thread-sanitized", "configurePreset": "thread-sanitized", "inherits": "test-base" },
     { "name": "release-native", "configurePreset": "release-native", "inherits": "test-base" },
     { "name": "profile-telemetry", "configurePreset": "profile-telemetry", "inherits": "test-base" },
     { "name": "tidy", "configurePreset": "tidy", "inherits": "test-base" },
@@ -106,6 +117,15 @@
         { "type": "configure", "name": "release-native" },
         { "type": "build", "name": "release-native" },
         { "type": "test", "name": "release-native" }
+      ]
+    },
+    {
+      "name": "thread-sanitized",
+      "displayName": "Debug + ThreadSanitizer workflow",
+      "steps": [
+        { "type": "configure", "name": "thread-sanitized" },
+        { "type": "build", "name": "thread-sanitized" },
+        { "type": "test", "name": "thread-sanitized" }
       ]
     },
     {

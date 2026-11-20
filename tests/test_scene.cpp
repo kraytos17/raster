@@ -23,6 +23,7 @@
 #include "raster/pipeline/clipper.hpp"
 #include "raster/pipeline/rasterizer.hpp"
 #include "raster/pipeline/shader.hpp"
+#include "raster/platform/allocation_probe.hpp"
 #include "raster/render/scene_renderer.hpp"
 
 #if defined(__clang__)
@@ -31,6 +32,58 @@
 #endif
 
 namespace {
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE("tiled scene renderer matches serial color and depth", "[scene][tile]") {
+        constexpr std::size_t width = 96U;
+        constexpr std::size_t height = 80U;
+        const auto mesh = raster::load_obj(
+            std::filesystem::path{RASTER_ASSET_DIR} / "models/clipping_sphere.obj"
+        );
+        REQUIRE(mesh.has_value());
+
+        raster::TgaImage image{};
+        image.width = 8U;
+        image.height = 8U;
+        image.pixels.resize(64U);
+        for (std::size_t y = 0; y < image.height; ++y) {
+            for (std::size_t x = 0; x < image.width; ++x) {
+                image.pixels[y * image.width + x] =
+                    ((x + y) & 1U) == 0U ? 0xFFFFAA33U : 0xFF3377DDU;
+            }
+        }
+        const raster::Texture2D<raster::LayoutTiled4x4> texture{image};
+        const raster::render::FreeLookCamera camera{
+            .position = raster::Vec3f{.x = 0.1F, .y = -0.2F, .z = 3.5F},
+            .yaw = 0.07F,
+            .pitch = 0.03F,
+        };
+        raster::Framebuffer serial{width, height};
+        raster::Framebuffer tiled{width, height};
+        raster::render::TileRenderer renderer{4U};
+
+        REQUIRE(
+            renderer.render_scene(tiled, *mesh, 0U, false, true, false, false, texture, camera)
+        );
+        REQUIRE(
+            raster::render::
+                render_scene(serial, *mesh, 0U, false, true, false, false, texture, camera)
+        );
+        REQUIRE(tiled.color_storage == serial.color_storage);
+        REQUIRE(tiled.depth_storage == serial.depth_storage);
+        std::size_t allocation_count = 0U;
+        bool repeated_rendered = false;
+        {
+            const raster::platform::ScopedAllocationProbe probe{true};
+            repeated_rendered =
+                renderer.render_scene(tiled, *mesh, 0U, false, true, false, false, texture, camera);
+            allocation_count = probe.allocations();
+        }
+        REQUIRE(repeated_rendered);
+        REQUIRE(tiled.color_storage == serial.color_storage);
+        REQUIRE(tiled.depth_storage == serial.depth_storage);
+        REQUIRE(allocation_count == 0U);
+    }
+
     // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
     TEST_CASE(
         "free-look forward speed scales with distance and remains bounded", "[scene][camera]"

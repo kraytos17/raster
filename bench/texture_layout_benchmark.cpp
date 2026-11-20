@@ -196,6 +196,94 @@ namespace {
         return times[times.size() / 2U];
     }
 
+    template <typename Render> [[nodiscard]]
+    std::uint64_t benchmark_frame_times(Render& render, const char* failure_message) {
+        constexpr std::size_t thread_warmups = 2U;
+        constexpr std::size_t thread_measured_passes = 7U;
+        for ([[maybe_unused]]
+             const auto pass : std::views::iota(std::size_t{0}, thread_warmups)) {
+            if (!render()) {
+                throw std::runtime_error(failure_message);
+            }
+        }
+
+        std::array<std::uint64_t, thread_measured_passes> times{};
+        for (auto& elapsed : times) {
+            const auto start = SDL_GetTicksNS();
+            if (!render()) {
+                throw std::runtime_error(failure_message);
+            }
+            elapsed = SDL_GetTicksNS() - start;
+        }
+
+        std::ranges::sort(times);
+        return times[times.size() / 2U];
+    }
+
+    void benchmark_scene_threads(
+        const raster::SoAMesh& mesh,
+        const raster::Texture2D<raster::LayoutTiled4x4>& texture,
+        std::size_t width,
+        std::size_t height
+    ) {
+        constexpr raster::render::FreeLookCamera camera{
+            .position = raster::Vec3f{.x = 0.0F, .y = 0.0F, .z = 3.0F},
+            .yaw = 0.0F,
+            .pitch = 0.0F,
+        };
+
+        constexpr std::array<std::size_t, 4> concurrency_levels{1U, 2U, 4U, 8U};
+        raster::Framebuffer serial_framebuffer{width, height};
+        const auto render_serial = [&] noexcept {
+            return raster::render::render_scene(
+                serial_framebuffer,
+                mesh,
+                0U,
+                false,
+                true,
+                false,
+                false,
+                texture,
+                camera
+            );
+        };
+
+        const auto serial_median = benchmark_frame_times(render_serial, "serial render failed");
+        std::println(
+            "serial tiled-layout baseline: {} triangles at {}x{}, median {:.3f} ms/frame (7 runs)",
+            mesh.triangle_count(),
+            width,
+            height,
+            static_cast<double>(serial_median) / 1.0e6
+        );
+        for (const auto concurrency : concurrency_levels) {
+            raster::render::TileRenderer renderer{concurrency};
+            raster::Framebuffer threaded_framebuffer{width, height};
+            const auto render_threaded = [&] noexcept {
+                return renderer.render_scene(
+                    threaded_framebuffer,
+                    mesh,
+                    0U,
+                    false,
+                    true,
+                    false,
+                    false,
+                    texture,
+                    camera
+                );
+            };
+
+            const auto threaded_median =
+                benchmark_frame_times(render_threaded, "threaded render failed");
+            std::println(
+                "tile concurrency {}: median {:.3f} ms/frame, {:.2f}x serial (7 runs)",
+                concurrency,
+                static_cast<double>(threaded_median) / 1.0e6,
+                static_cast<double>(serial_median) / static_cast<double>(threaded_median)
+            );
+        }
+    }
+
     [[nodiscard]]
     raster::TgaImage make_checker_4k() {
         raster::TgaImage image{};
@@ -222,18 +310,20 @@ int main(int argc, char* argv[]) noexcept {
         const auto sequential_order = make_quad_order(false);
         const auto randomized_order = make_quad_order(true);
         const auto first_argument = argc > 1 ? std::string_view{argv[1]} : std::string_view{};
-        const auto selected_mode =
-            first_argument == "scene" ? first_argument : std::string_view{"fetch"};
+        const auto selected_mode = first_argument == "scene" || first_argument == "scene-threads"
+            ? first_argument
+            : std::string_view{"fetch"};
 
         const auto layout_argument_index = selected_mode == "scene" ? 2 : 1;
         const auto order_argument_index = layout_argument_index + 1;
         const auto selected_layout = argc > layout_argument_index
             ? std::string_view{argv[layout_argument_index]}
             : std::string_view{};
+
         const auto selected_order = argc > order_argument_index
             ? std::string_view{argv[order_argument_index]}
             : std::string_view{};
-        if (selected_mode == "scene") {
+        if (selected_mode == "scene" || selected_mode == "scene-threads") {
             const auto mesh_result = raster::load_obj(
                 std::filesystem::path{RASTER_ASSET_DIR} / "models/clipping_sphere.obj"
             );
@@ -247,6 +337,15 @@ int main(int argc, char* argv[]) noexcept {
             const raster::Texture2D<raster::LayoutMorton> morton_texture{checker_image};
             constexpr std::size_t viewport_width = 640U;
             constexpr std::size_t viewport_height = 480U;
+            if (selected_mode == "scene-threads") {
+                benchmark_scene_threads(
+                    *mesh_result,
+                    tiled_texture,
+                    viewport_width,
+                    viewport_height
+                );
+                return 0;
+            }
 
             double row_major_time = 0.0;
             double tiled_time = 0.0;
@@ -288,7 +387,7 @@ int main(int argc, char* argv[]) noexcept {
             return 0;
         }
         if (selected_mode != "fetch") {
-            report_failure("mode must be fetch or scene");
+            report_failure("mode must be fetch, scene, or scene-threads");
             return 2;
         }
         if ((!selected_order.empty()

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <memory>
 
 #include "raster/math/vec.hpp"
 #include "raster/memory/framebuffer.hpp"
@@ -22,6 +23,35 @@ namespace raster::render {
     inline constexpr float free_look_movement_speed(const Vec3f& camera_position) noexcept {
         return std::clamp(length(camera_position) * 0.8F, 2.5F, 20.0F);
     }
+
+    class TileRenderer {
+    public:
+
+        explicit TileRenderer(std::size_t concurrency);
+        TileRenderer(const TileRenderer&) = delete;
+        TileRenderer& operator=(const TileRenderer&) = delete;
+        TileRenderer(TileRenderer&&) noexcept;
+        TileRenderer& operator=(TileRenderer&&) noexcept;
+        ~TileRenderer();
+
+        [[nodiscard]]
+        bool render_scene(
+            Framebuffer& framebuffer,
+            const SoAMesh& mesh,
+            std::uint64_t elapsed_ns,
+            bool clip_stress_test,
+            bool free_look_test,
+            bool guard_band_test,
+            bool solid_color_debug,
+            const Texture2D<LayoutTiled4x4>& texture,
+            const FreeLookCamera& camera
+        ) noexcept;
+
+    private:
+
+        struct Impl;
+        std::unique_ptr<Impl> impl_{};
+    };
 
     // Render the current procedural checker-floor scene or the deterministic
     // camera sweep used by the clipping stress gate. Returns false if clipping

@@ -49,9 +49,11 @@ just preset=release-native build          # build a specific preset
 just preset=release-native texture-benchmark # quad-fetch microbenchmark, sequential/shuffled
 just preset=release-native texture-benchmark-scene # sphere render: 3,968 triangles, 4K texture, all layouts
 just preset=release-native texture-benchmark-scene morton # isolate one scene layout for perf stat
+just preset=release-native texture-benchmark-threads # serial vs 1/2/4/8 tile workers
 just preset=debug-sanitized test          # run Catch2 test suite
 just preset=debug-sanitized resize-gate   # headless SDL resize/minimize test under ASan
 just preset=debug-sanitized clip-stress-gate # high-poly camera-through + allocation trap
+just tsan                                  # ThreadSanitizer workflow for tile rendering
 just free-look                             # release-native; 60 FPS-paced adaptive-res mouse look + distance-scaled WASD
 just verify                               # format check, cppcheck, clang-tidy, sanitized tests
 just run                                  # build and run
@@ -76,7 +78,7 @@ Override defaults locally by setting `RASTER_PRESET` / `RASTER_JOBS` or copying 
   | Morton | 35.74 ns/quad; 28.17M misses | 109.12 ns/quad; 73.88M misses |
 
   These numbers are specific to this CPU, compiler, and benchmark access pattern—not a general layout ranking. Row-major was fastest in this run; Morton had fewer shuffled cache misses but much higher time, indicating mapping overhead matters too. The benchmark excludes rasterization and shader work.
-- [ ] **M6 — Multithreaded tile engine:** 16×16 tile binning, `std::jthread` work-stealing, per-thread transient arenas, zero-allocation frame verification, and TSan validation.
+- [ ] **M6 — Multithreaded tile engine:** 16×16 stable-order tile bins, a persistent `std::jthread` work-stealing executor, and tile-bounded rasterization that preserves global 2×2 helper quads. `TileRenderer` is integrated into the app; serial/threaded framebuffer equivalence is tested, including color and depth, and the allocation probe counts across worker threads. `just preset=debug-sanitized clip-stress-gate` passes 120 high-poly frames with zero render allocations; `just tsan` runs the full test suite under ThreadSanitizer. Preliminary `texture-benchmark-threads` results on CachyOS/GCC 16.2 native Release/LTO at 640×480 (3,968-triangle sphere, 7 measured frames): serial 32.47 ms/frame; tiled concurrency 1/2/4/8 measured 36.37/20.29/11.99/8.01 ms/frame. These are a single-host run and need repeat/variance checks before drawing general conclusions. Remaining: per-thread transient arenas, CI coverage, benchmark repeatability/tuning, and final review.
 
 ### Future Ideas
 
