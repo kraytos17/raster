@@ -448,6 +448,10 @@ namespace raster::platform {
             );
             return SDL_APP_FAILURE;
         }
+
+        static const bool profile =
+            SDL_GetEnvironmentVariable(SDL_GetEnvironment(), "RASTER_PROFILE") != nullptr;
+        const auto present_begin_ns = SDL_GetTicksNS();
         if (auto result = state.presenter.present(state.framebuffer); !result) {
             std::println(
                 stderr,
@@ -458,6 +462,14 @@ namespace raster::platform {
         }
 
         const auto presented_ns = SDL_GetTicksNS();
+        if (profile) {
+            std::println(
+                stderr,
+                "raster: profile frame render {:.2f} ms present {:.2f} ms",
+                static_cast<double>(present_begin_ns - frame_start_ns) / 1.0e6,
+                static_cast<double>(presented_ns - present_begin_ns) / 1.0e6
+            );
+        }
         if (state.free_look_test) {
             const auto frame_time_ns = presented_ns - frame_start_ns;
             state.free_look_frame_times_ns[state.free_look_frame_time_sample_cursor] =
