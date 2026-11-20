@@ -52,6 +52,18 @@ namespace {
     }
 
     // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE("tile worker count resolves env override with clamping", "[tile][executor]") {
+        // No override: hardware concurrency clamped into [1, maximum].
+        REQUIRE(raster::resolve_tile_workers(8U, 0U) == 8U);
+        REQUIRE(raster::resolve_tile_workers(0U, 0U) == 1U);
+        REQUIRE(raster::resolve_tile_workers(64U, 0U) == raster::maximum_tile_concurrency);
+        // Explicit override wins, still capped.
+        REQUIRE(raster::resolve_tile_workers(8U, 4U) == 4U);
+        REQUIRE(raster::resolve_tile_workers(8U, 1U) == 1U);
+        REQUIRE(raster::resolve_tile_workers(8U, 100U) == raster::maximum_tile_concurrency);
+    }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
     TEST_CASE("tile executor processes each tile once across repeated frames", "[tile][executor]") {
         raster::TileExecutor executor{3U};
         std::vector<std::atomic_size_t> visits(257U);

@@ -2,9 +2,11 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <memory>
 #include <print>
@@ -16,6 +18,7 @@
 #include "raster/memory/framebuffer.hpp"
 #include "raster/memory/soa_mesh.hpp"
 #include "raster/memory/texture.hpp"
+#include "raster/pipeline/tile_executor.hpp"
 #include "raster/platform/allocation_probe.hpp"
 #include "raster/platform/sdl3_presenter.hpp"
 #include "raster/render/scene_renderer.hpp"
@@ -29,8 +32,25 @@ namespace raster::platform {
         constexpr std::uint64_t free_look_frame_budget_ns = 16'666'667U;
         constexpr std::uint64_t free_look_headroom_budget_ns = 12'500'000U;
         constexpr std::size_t free_look_timing_sample_capacity = 240U;
-        constexpr std::size_t maximum_tile_concurrency = 8U;
         constexpr std::uint32_t clip_stress_frame_count = 120;
+
+        // Explicit worker override from RASTER_WORKERS; 0 means unset or
+        // unparsable (full match required, so "4x" doesn't silently become 4).
+        [[nodiscard]]
+        std::size_t requested_tile_workers() noexcept {
+            const auto* value = SDL_GetEnvironmentVariable(SDL_GetEnvironment(), "RASTER_WORKERS");
+            if (value == nullptr) {
+                return 0U;
+            }
+
+            const auto length = std::strlen(value);
+            std::size_t parsed = 0U;
+            const auto [end, code] = std::from_chars(value, value + length, parsed);
+            if (code != std::errc{} || end != value + length) {
+                return 0U;
+            }
+            return parsed;
+        }
 
         struct AppState {
             raster::Framebuffer framebuffer{initial_width, initial_height};
@@ -38,10 +58,9 @@ namespace raster::platform {
             raster::SoAMesh mesh{};
             raster::TgaImage checker_texture{};
             raster::Texture2D<raster::LayoutTiled4x4> texture{};
-            raster::render::TileRenderer tile_renderer{std::clamp(
+            raster::render::TileRenderer tile_renderer{raster::resolve_tile_workers(
                 static_cast<std::size_t>(std::thread::hardware_concurrency()),
-                std::size_t{1},
-                maximum_tile_concurrency
+                requested_tile_workers()
             )};
 
             bool tile_renderer_warmed{};

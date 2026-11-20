@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <cassert>
 #include <condition_variable>
@@ -11,7 +12,43 @@
 #include <utility>
 #include <vector>
 
+#if defined(__linux__)
+#include <pthread.h>
+#endif
+
 namespace raster {
+    // Upper bound on tile workers. Oversubscription beyond physical cores
+    // collapses throughput on small-core-count hosts, so both the
+    // default and any explicit override clamp here.
+    inline constexpr std::size_t maximum_tile_concurrency = 8U;
+
+    // Resolve worker count: an explicit nonzero request (RASTER_WORKERS) wins
+    // but stays capped; otherwise hardware concurrency clamped into range.
+    [[nodiscard]]
+    inline std::size_t resolve_tile_workers(
+        std::size_t hardware_concurrency, std::size_t requested
+    ) noexcept {
+        if (requested != 0U) {
+            return std::min(requested, maximum_tile_concurrency);
+        }
+        return std::clamp(hardware_concurrency, std::size_t{1}, maximum_tile_concurrency);
+    }
+
+#if defined(__linux__)
+    // Best-effort pin of the calling worker thread to one CPU, round-robin.
+    inline void pin_worker_to_cpu(std::size_t worker_index) noexcept {
+        const auto cpu_count = std::thread::hardware_concurrency();
+        if (cpu_count == 0U) {
+            return;
+        }
+
+        cpu_set_t cpus{};
+        CPU_ZERO(&cpus);
+        CPU_SET(worker_index % cpu_count, &cpus);
+        (void)pthread_setaffinity_np(pthread_self(), sizeof(cpus), &cpus);
+    }
+#endif
+
     // Static contiguous partition of [0, item_count) across worker_count
     // workers: worker w gets [begin, end). Extra workers get empty ranges;
     // concatenating every worker's range in order reproduces the input order,
@@ -49,7 +86,12 @@ namespace raster {
 
             workers_.reserve(concurrency - 1U);
             for (std::size_t index = 1U; index < concurrency; ++index) {
-                workers_.emplace_back([this] { worker_loop(); });
+                workers_.emplace_back([this, index] {
+#if defined(__linux__)
+                    pin_worker_to_cpu(index);
+#endif
+                    worker_loop();
+                });
             }
         }
 
