@@ -20,6 +20,38 @@
 
 namespace {
     // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE("static partitioning covers every item exactly once", "[tile][executor]") {
+        const auto span = [](std::size_t items, std::size_t workers, std::size_t worker) {
+            return raster::partition_range(items, workers, worker);
+        };
+        REQUIRE(span(10U, 3U, 0U) == std::pair{0U, 4U});
+        REQUIRE(span(10U, 3U, 1U) == std::pair{4U, 7U});
+        REQUIRE(span(10U, 3U, 2U) == std::pair{7U, 10U});
+        REQUIRE(span(2U, 4U, 0U) == std::pair{0U, 1U});
+        REQUIRE(span(2U, 4U, 1U) == std::pair{1U, 2U});
+        REQUIRE(span(2U, 4U, 2U) == std::pair{2U, 2U});
+        REQUIRE(span(2U, 4U, 3U) == std::pair{2U, 2U});
+        REQUIRE(span(0U, 4U, 0U) == std::pair{0U, 0U});
+        REQUIRE(span(7U, 1U, 0U) == std::pair{0U, 7U});
+
+        // Contiguous coverage with no gaps or overlaps for assorted shapes.
+        for (const auto items : {0U, 1U, 5U, 16U, 17U, 100U, 1000U}) {
+            for (const auto workers :
+                 {std::size_t{1}, std::size_t{2}, std::size_t{4}, std::size_t{7}}) {
+                std::size_t cursor = 0;
+                for (std::size_t worker = 0; worker < workers; ++worker) {
+                    const auto [begin, end] = span(items, workers, worker);
+                    REQUIRE(begin == cursor);
+                    REQUIRE(end >= begin);
+                    REQUIRE(end <= items);
+                    cursor = end;
+                }
+                REQUIRE(cursor == items);
+            }
+        }
+    }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
     TEST_CASE("tile executor processes each tile once across repeated frames", "[tile][executor]") {
         raster::TileExecutor executor{3U};
         std::vector<std::atomic_size_t> visits(257U);

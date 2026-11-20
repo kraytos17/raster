@@ -12,12 +12,35 @@
 #include <vector>
 
 namespace raster {
+    // Static contiguous partition of [0, item_count) across worker_count
+    // workers: worker w gets [begin, end). Extra workers get empty ranges;
+    // concatenating every worker's range in order reproduces the input order,
+    // which keeps deterministic per-item output stable under threading.
+    [[nodiscard]]
+    inline std::pair<std::size_t, std::size_t> partition_range(
+        std::size_t item_count, std::size_t worker_count, std::size_t worker_index
+    ) noexcept {
+        if (worker_count == 0U || worker_index >= worker_count) {
+            return {0U, 0U};
+        }
+
+        const auto chunk = item_count / worker_count;
+        const auto remainder = item_count % worker_count;
+        const auto begin = worker_index * chunk + std::min(worker_index, remainder);
+        return {begin, begin + chunk + static_cast<std::size_t>(worker_index < remainder)};
+    }
+
     // Persistent tile workers with an atomic work index. worker_count is total
     // concurrency including the calling thread. The caller participates in each
     // dispatch, and the executor retains worker/synchronization storage between
     // frames.
     class TileExecutor {
     public:
+
+        [[nodiscard]]
+        std::size_t concurrency() const noexcept {
+            return workers_.size() + 1U;
+        }
 
         explicit TileExecutor(std::size_t concurrency) {
             if (concurrency == 0U) {

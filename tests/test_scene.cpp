@@ -133,6 +133,28 @@ namespace {
             }
         }
         REQUIRE(covered > width * height / 10U);
+
+        // Parallel prepare must reproduce the serial framebuffer exactly,
+        // including color and depth, on a mesh large enough to span chunks.
+        raster::Framebuffer threaded{width, height};
+        raster::render::TileRenderer renderer{4U};
+        REQUIRE(
+            renderer.render_scene(threaded, mesh, 0U, false, true, false, true, texture, camera)
+        );
+        REQUIRE(threaded.color_storage == framebuffer.color_storage);
+        REQUIRE(threaded.depth_storage == framebuffer.depth_storage);
+
+        std::size_t allocation_count = 0U;
+        bool repeated_rendered = false;
+        {
+            const raster::platform::ScopedAllocationProbe probe{true};
+            repeated_rendered =
+                renderer
+                    .render_scene(threaded, mesh, 0U, false, true, false, true, texture, camera);
+            allocation_count = probe.allocations();
+        }
+        REQUIRE(repeated_rendered);
+        REQUIRE(allocation_count == 0U);
     }
 
     // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.

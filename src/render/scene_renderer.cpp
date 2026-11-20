@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -280,11 +281,13 @@ namespace raster::render {
             std::size_t width,
             std::size_t height,
             bool guard_band_test,
+            std::size_t begin_triangle,
+            std::size_t end_triangle,
             std::vector<PreparedTriangle<Layout>>& prepared
         ) noexcept {
             prepared.clear();
             for (const auto triangle_index :
-                 std::views::iota(std::size_t{0}, mesh.triangle_count())) {
+                 std::views::iota(begin_triangle, std::min(end_triangle, mesh.triangle_count()))) {
                 const auto index_base = triangle_index * 3U;
                 const auto vertex_a = static_cast<std::size_t>(mesh.indices[index_base]);
                 const auto vertex_b = static_cast<std::size_t>(mesh.indices[index_base + 1U]);
@@ -401,7 +404,12 @@ namespace raster::render {
             explicit TileRenderState(std::size_t concurrency) :
                 executor{concurrency} {}
 
-            void reserve(std::size_t width, std::size_t height, std::size_t mesh_triangle_count) {
+            void reserve(
+                std::size_t width,
+                std::size_t height,
+                std::size_t mesh_triangle_count,
+                std::size_t worker_count
+            ) {
                 const auto columns = width
                     / raster_tile_size
                     + static_cast<std::size_t>(width % raster_tile_size != 0U);
@@ -413,12 +421,20 @@ namespace raster::render {
                 prepared.reserve(mesh_triangle_count * 8U);
                 setups.reserve(mesh_triangle_count * 8U);
                 bins.reserve(tile_count, tile_count * 8U);
+                thread_prepared.resize(worker_count);
+                const auto chunk_reserve =
+                    (mesh_triangle_count + worker_count - 1U) / worker_count * 8U + 1U;
+                for (auto& chunk : thread_prepared) {
+                    chunk.clear();
+                    chunk.reserve(chunk_reserve);
+                }
             }
 
             TileExecutor executor;
             TileBins bins{};
             std::vector<PreparedTriangle<Layout>> prepared{};
             std::vector<ScreenTriangle> setups{};
+            std::vector<std::vector<PreparedTriangle<Layout>>> thread_prepared{};
         };
 
         template <typename Layout> [[nodiscard]]
@@ -432,17 +448,44 @@ namespace raster::render {
         ) noexcept {
             const auto width = framebuffer.width;
             const auto height = framebuffer.height;
+            const auto triangle_count = mesh.triangle_count();
+            const auto worker_count = tile_state.executor.concurrency();
             if (allow_allocation) {
-                tile_state.reserve(width, height, mesh.triangle_count());
+                tile_state.reserve(width, height, triangle_count, worker_count);
             }
-            if (!prepare_mesh(shader, mesh, width, height, guard_band_test, tile_state.prepared)) {
+
+            std::atomic_bool prepared_ok{true};
+            tile_state.executor.execute(worker_count, [&](std::size_t worker) noexcept {
+                auto& chunk = tile_state.thread_prepared[worker];
+                chunk.clear();
+                const auto [begin, end] = partition_range(triangle_count, worker_count, worker);
+                if (!prepare_mesh(
+                        shader,
+                        mesh,
+                        width,
+                        height,
+                        guard_band_test,
+                        begin,
+                        end,
+                        chunk
+                    )) {
+                    prepared_ok.store(false, std::memory_order_relaxed);
+                }
+            });
+            if (!prepared_ok.load(std::memory_order_relaxed)) {
                 return false;
             }
 
-            tile_state.setups.clear();
-            tile_state.setups.reserve(tile_state.prepared.size());
-            for (const auto& prepared : tile_state.prepared) {
-                tile_state.setups.push_back(prepared.setup);
+            auto& prepared = tile_state.prepared;
+            auto& setups = tile_state.setups;
+            prepared.clear();
+            setups.clear();
+            setups.reserve(prepared.capacity());
+            for (const auto& chunk : tile_state.thread_prepared) {
+                for (const auto& triangle : chunk) {
+                    prepared.push_back(triangle);
+                    setups.push_back(triangle.setup);
+                }
             }
 
             bin_triangles(tile_state.setups, width, height, tile_state.bins);
