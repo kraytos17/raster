@@ -32,18 +32,13 @@ namespace raster {
     // pixel spans 16 sub-pixel units (2^4); the sampling center of integer
     // pixel (x, y) is exactly ((x << 4) + 8, (y << 4) + 8) in sub-pixel units.
     //
-    // Edge-function sign convention: the plan (§5.1) writes
-    //   E_ab(P) = (X_a - X_b)(Y_p - Y_a) - (Y_a - Y_b)(X_p - X_a)
-    // but also requires Area_fx = E_01(V_2) > 0 for front-facing triangles,
-    // where a CCW-winding (view-space, +Y up) triangle projects to a visually
-    // clockwise loop under the +Y-down viewport flip. Those two statements are
-    // inconsistent as written: for the clockwise loop the formula above
-    // evaluates to -E_standard, so Area_fx = E_01(V_2) < 0. The consistent
-    // convention — used here and matching the engine's winding claims — is the
-    // standard cross product:
+    // Edge-function sign convention: front-facing triangles are
+    // counter-clockwise as seen in NDC (y-up), which is negative shoelace
+    // area in y-down pixels. The standard cross product
     //   E_ab(P) = (X_b - X_a)(Y_p - Y_a) - (Y_b - Y_a)(X_p - X_a)
-    // so that interior points satisfy E >= 0 on every edge and the twice-signed
-    // area (scaled by 2^8, see below) is E_01(V_2) > 0 for front faces.
+    // is therefore <= 0 on the interior side of every edge, and the
+    // twice-signed area (scaled by 2^8, see below) satisfies E_01(V_2) < 0
+    // for front faces (> 0 culls as backfacing, == 0 is degenerate).
 
     inline constexpr std::uint32_t subpixel_bits = 4;
     inline constexpr std::int32_t subpixel_scale = static_cast<std::int32_t>(1U << subpixel_bits);
@@ -73,8 +68,8 @@ namespace raster {
     }
 
     // Standard 2D cross product (B - A) x (P - A) in 28.8 fixed-point:
-    // > 0 when P is on the interior side of edge A -> B for a front-facing
-    // (positive-shoelace) triangle.
+    // < 0 when P is on the interior side of edge A -> B for a front-facing
+    // (negative-shoelace) triangle.
     [[nodiscard]]
     constexpr std::int64_t edge_function(
         std::int32_t ax,
@@ -91,7 +86,7 @@ namespace raster {
 
     // Exact per-pixel edge deltas in 28.8 fixed-point: moving the sample point
     // one full pixel right adds -16 * edge_dy; one full pixel down adds
-    // +16 * edge_dx (plan §5.1 deltas, sign-corrected for the standard cross).
+    // +16 * edge_dx.
     [[nodiscard]]
     constexpr std::int64_t edge_step_x(std::int32_t ay, std::int32_t by) noexcept {
         return -static_cast<std::int64_t>(by - ay) * subpixel_scale;
@@ -118,12 +113,13 @@ namespace raster {
         return edge_dy < 0 || (edge_dy == 0 && edge_dx > 0);
     }
 
-    // Coverage bias added to a raw edge value before the >= 0 test: 0 keeps
-    // exact-on-edge centers for top/left edges, -1 culls them otherwise.
+    // Coverage bias added to a raw edge value before the <= 0 test: 0 keeps
+    // exact-on-edge centers for top/left edges, +1 culls them otherwise.
+    // Negated from the naive -1 because interior edge values are <= 0.
     [[nodiscard]]
     constexpr std::int64_t edge_bias(
         std::int32_t ax, std::int32_t ay, std::int32_t bx, std::int32_t by
     ) noexcept {
-        return is_top_or_left_edge(ax, ay, bx, by) ? 0 : -1;
+        return is_top_or_left_edge(ax, ay, bx, by) ? 0 : 1;
     }
 } // namespace raster

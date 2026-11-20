@@ -30,15 +30,9 @@ namespace raster::render {
 
         [[nodiscard]]
         std::uint32_t to_argb(const Rgb& rgb) noexcept {
-            const auto clamp_channel = [](float channel) noexcept {
-                return std::clamp(channel, 0.0F, 1.0F);
-            };
-
-            const auto red = static_cast<std::uint32_t>(std::lround(clamp_channel(rgb.r) * 255.0F));
-            const auto green =
-                static_cast<std::uint32_t>(std::lround(clamp_channel(rgb.g) * 255.0F));
-            const auto blue =
-                static_cast<std::uint32_t>(std::lround(clamp_channel(rgb.b) * 255.0F));
+            const auto red = quantize_channel(std::clamp(rgb.r, 0.0F, 1.0F) * 255.0F);
+            const auto green = quantize_channel(std::clamp(rgb.g, 0.0F, 1.0F) * 255.0F);
+            const auto blue = quantize_channel(std::clamp(rgb.b, 0.0F, 1.0F) * 255.0F);
             return 0xFF000000U | (red << 16U) | (green << 8U) | blue;
         }
 
@@ -594,7 +588,8 @@ namespace raster::render {
             };
         }
 
-        draw_overlay_triangle(framebuffer, spinner[0], spinner[1], spinner[2], red, green, blue);
+        // Counter-clockwise as seen in NDC (y-up): the front-facing order.
+        draw_overlay_triangle(framebuffer, spinner[0], spinner[2], spinner[1], red, blue, green);
         return true;
     }
 

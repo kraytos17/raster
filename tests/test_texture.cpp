@@ -59,6 +59,34 @@ namespace {
     }
 
     // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE("mip LOD of unit derivatives matches texture size", "[texture][mipmap]") {
+        const raster::QuadDerivatives derivatives{
+            .duv_dx = raster::Vec2f{.x = 1.0F, .y = 0.0F},
+            .duv_dy = raster::Vec2f{.x = 0.0F, .y = 1.0F},
+        };
+        REQUIRE(raster::mip_lod(derivatives, 256U, 256U) == 8.0F);
+        REQUIRE(raster::mip_lod(derivatives, 64U, 64U) == 6.0F);
+    }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE("bilinear channel blending rounds half up at midpoints", "[texture][filtering]") {
+        raster::TgaImage image{};
+        image.width = 2U;
+        image.height = 2U;
+        image.pixels = {0xFF000000U, 0xFFFFFFFFU, 0xFF000000U, 0xFFFFFFFFU};
+        const raster::Texture2D<std::layout_right> texture{image};
+
+        // blend(0, 255, 0.5) == 127.5 rounds to 128; blend at 0.25 gives 64.
+        REQUIRE(texture.sample_trilinear(0.5F, 0.5F, 0.0F) == 0xFF808080U);
+        REQUIRE(texture.sample_trilinear(0.375F, 0.5F, 0.0F) == 0xFF404040U);
+
+        // Out-of-range U wraps: 0.125 lands on texel -0.25 (base -1 wraps to
+        // the last column), 0.875 lands on texel 1.25 (base + 1 wraps to 0).
+        REQUIRE(texture.sample_trilinear(0.125F, 0.5F, 0.0F) == 0xFF404040U);
+        REQUIRE(texture.sample_trilinear(0.875F, 0.5F, 0.0F) == 0xFFBFBFBFU);
+    }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
     TEST_CASE("swizzled layouts are bijective for padded dimensions", "[texture][layout]") {
         using Extents = std::dextents<std::size_t, 2>;
         const Extents extents{5U, 7U};

@@ -264,10 +264,10 @@ namespace {
             );
         }
 
-        // The projected vertices have negative screen-space winding in this
-        // order; swap B/C to produce a front-facing triangle and keep all
-        // associated varying/depth data in the same reordered convention.
-        const std::array<std::size_t, 3> front_order{0, 2, 1};
+        // The projected vertices have counter-clockwise winding as seen in
+        // NDC, which is the front-facing order; keep all associated
+        // varying/depth data in the same convention.
+        const std::array<std::size_t, 3> front_order{0, 1, 2};
         const std::array<float, 3> front_inv_w{
             inv_w[front_order[0]],
             inv_w[front_order[1]],

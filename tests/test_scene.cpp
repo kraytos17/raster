@@ -18,6 +18,7 @@
 #include "raster/io/tga_loader.hpp"
 #include "raster/math/mat.hpp"
 #include "raster/math/vec.hpp"
+#include "raster/memory/grid_mesh.hpp"
 #include "raster/memory/texture.hpp"
 #include "raster/memory/texture_layout.hpp"
 #include "raster/pipeline/clipper.hpp"
@@ -82,6 +83,87 @@ namespace {
         REQUIRE(tiled.color_storage == serial.color_storage);
         REQUIRE(tiled.depth_storage == serial.depth_storage);
         REQUIRE(allocation_count == 0U);
+    }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE("procedural grid mesh is watertight and faces up", "[scene][stress]") {
+        const auto mesh = raster::make_grid_mesh(24U, 24U, 4.0F, -0.5F, -20.0F, 8.0F);
+        REQUIRE(mesh.triangle_count() == 24U * 24U * 2U);
+        REQUIRE(mesh.has_consistent_vertex_streams());
+        REQUIRE(mesh.positions.size() == 25U * 25U);
+        for (const auto index : mesh.indices) {
+            REQUIRE(index < mesh.positions.size());
+        }
+        for (std::size_t triangle = 0; triangle < mesh.triangle_count(); ++triangle) {
+            const auto ia = static_cast<std::size_t>(mesh.indices[triangle * 3U]);
+            const auto ib = static_cast<std::size_t>(mesh.indices[triangle * 3U + 1U]);
+            const auto ic = static_cast<std::size_t>(mesh.indices[triangle * 3U + 2U]);
+            const auto face_normal = raster::cross(
+                mesh.positions[ib] - mesh.positions[ia],
+                mesh.positions[ic] - mesh.positions[ia]
+            );
+            REQUIRE(raster::length_squared(face_normal) > 0.0F);
+            REQUIRE(
+                raster::dot(face_normal, raster::Vec3f{.x = 0.0F, .y = 1.0F, .z = 0.0F}) > 0.0F
+            );
+        }
+
+        raster::TgaImage one_texel{};
+        one_texel.width = 1U;
+        one_texel.height = 1U;
+        one_texel.pixels.push_back(0xFF336699U);
+        const raster::Texture2D<raster::LayoutTiled4x4> texture{one_texel};
+        constexpr std::size_t width = 320U;
+        constexpr std::size_t height = 240U;
+        raster::Framebuffer framebuffer{width, height};
+        const raster::render::FreeLookCamera camera{
+            .position = raster::Vec3f{.x = 0.0F, .y = 3.0F, .z = 2.0F},
+            .yaw = 0.0F,
+            .pitch = -0.9F,
+        };
+        REQUIRE(
+            raster::render::
+                render_scene(framebuffer, mesh, 0U, false, true, false, true, texture, camera)
+        );
+        std::size_t covered = 0U;
+        const auto depths = std::as_const(framebuffer).depth_view();
+        for (std::size_t y = 0; y < height; ++y) {
+            for (std::size_t x = 0; x < width; ++x) {
+                covered += depths[y, x] > 0.0F ? 1U : 0U;
+            }
+        }
+        REQUIRE(covered > width * height / 10U);
+    }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE("sphere renders the near hemisphere", "[scene][sphere][winding]") {
+        const auto mesh = raster::load_obj(
+            std::filesystem::path{RASTER_ASSET_DIR} / "models/clipping_sphere.obj"
+        );
+        REQUIRE(mesh.has_value());
+
+        raster::TgaImage one_texel{};
+        one_texel.width = 1U;
+        one_texel.height = 1U;
+        one_texel.pixels.push_back(0xFF336699U);
+        const raster::Texture2D<raster::LayoutTiled4x4> texture{one_texel};
+        constexpr std::size_t width = 80U;
+        constexpr std::size_t height = 60U;
+        raster::Framebuffer framebuffer{width, height};
+        const raster::render::FreeLookCamera camera{
+            .position = raster::Vec3f{.x = 0.0F, .y = 0.0F, .z = 3.0F},
+            .yaw = 0.0F,
+            .pitch = 0.0F,
+        };
+        REQUIRE(
+            raster::render::
+                render_scene(framebuffer, *mesh, 0U, false, true, false, true, texture, camera)
+        );
+        // Reverse-Z: near plane maps to 1, far plane to 0. The sphere center
+        // must show the near wall (depth ~0.005 at this camera), not the far
+        // wall (~0.001). This pins front-face culling against mirroring.
+        const auto depth = std::as_const(framebuffer).depth_view();
+        REQUIRE(depth[height / 2U, width / 2U] > 0.004F);
     }
 
     // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
@@ -204,8 +286,8 @@ namespace {
                 const auto far_right = make_vertex(position(x_index + 1, z_index + 1));
                 const auto far_left = make_vertex(position(x_index, z_index + 1));
                 const std::array<std::array<CheckerFloorShader::Varyings, 3>, 2> source_triangles{
-                    std::array{near_left, far_right, near_right},
-                    std::array{near_left, far_left, far_right},
+                    std::array{near_left, near_right, far_right},
+                    std::array{near_left, far_right, far_left},
                 };
 
                 for (const auto& source : source_triangles) {
@@ -449,15 +531,13 @@ namespace {
         REQUIRE(clipped_output_triangles > 0U);
         REQUIRE(guard_band_output_triangles > 0U);
         REQUIRE(guard_band_saved_triangles > 0U);
-        REQUIRE(rasterized_fragments > 0U);
-
-        const auto first_covered = std::ranges::find(equator_coverage, std::uint8_t{1});
-        REQUIRE(first_covered != equator_coverage.end());
-        const auto last_covered = std::ranges::find_last(equator_coverage, std::uint8_t{1});
-        REQUIRE(last_covered.begin() != last_covered.end());
-        for (auto pixel = first_covered; pixel != last_covered.begin(); ++pixel) {
-            REQUIRE(*pixel == 1U);
-        }
+        // From inside a closed outward-wound mesh every triangle faces away,
+        // so correct backface culling rasterizes nothing; the clipping and
+        // projectability assertions above are this traversal's coverage.
+        REQUIRE(rasterized_fragments == 0U);
+        REQUIRE(std::ranges::all_of(equator_coverage, [](std::uint8_t value) {
+            return value == 0U;
+        }));
     }
 
     // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
@@ -468,8 +548,8 @@ namespace {
         constexpr std::size_t height = 8;
         const auto triangle = raster::make_screen_triangle(
             raster::ScreenPoint{.x = 3.0F, .y = 1.0F},
-            raster::ScreenPoint{.x = 7.0F, .y = 1.0F},
             raster::ScreenPoint{.x = 3.0F, .y = 7.0F},
+            raster::ScreenPoint{.x = 7.0F, .y = 1.0F},
             std::array<float, 3>{1.0F, 1.0F, 1.0F},
             std::array<float, 3>{0.5F, 0.5F, 0.5F}
         );
@@ -521,8 +601,8 @@ namespace {
             for (const auto lane : std::views::iota(std::size_t{0}, std::size_t{4})) {
                 const auto& bary = quad.lanes[lane];
                 helper_uv[lane] = raster::Vec2f{
-                    .x = bary.a1 * 0.25F,
-                    .y = bary.a2 * 0.375F,
+                    .x = bary.a2 * 0.25F,
+                    .y = bary.a1 * 0.375F,
                 };
                 REQUIRE(std::isfinite(helper_uv[lane].x));
                 REQUIRE(std::isfinite(helper_uv[lane].y));

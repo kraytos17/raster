@@ -15,6 +15,7 @@
 #include "raster/io/obj_loader.hpp"
 #include "raster/io/tga_loader.hpp"
 #include "raster/memory/framebuffer.hpp"
+#include "raster/memory/grid_mesh.hpp"
 #include "raster/memory/soa_mesh.hpp"
 #include "raster/memory/texture.hpp"
 #include "raster/memory/texture_layout.hpp"
@@ -197,17 +198,17 @@ namespace {
     }
 
     template <typename Render> [[nodiscard]]
-    std::uint64_t benchmark_frame_times(Render& render, const char* failure_message) {
-        constexpr std::size_t thread_warmups = 2U;
-        constexpr std::size_t thread_measured_passes = 7U;
+    std::uint64_t benchmark_frame_times(
+        Render& render, const char* failure_message, std::size_t warmups, std::size_t measured
+    ) {
         for ([[maybe_unused]]
-             const auto pass : std::views::iota(std::size_t{0}, thread_warmups)) {
+             const auto pass : std::views::iota(std::size_t{0}, warmups)) {
             if (!render()) {
                 throw std::runtime_error(failure_message);
             }
         }
 
-        std::array<std::uint64_t, thread_measured_passes> times{};
+        std::vector<std::uint64_t> times(measured);
         for (auto& elapsed : times) {
             const auto start = SDL_GetTicksNS();
             if (!render()) {
@@ -220,18 +221,16 @@ namespace {
         return times[times.size() / 2U];
     }
 
-    void benchmark_scene_threads(
+    void benchmark_thread_scaling(
         const raster::SoAMesh& mesh,
         const raster::Texture2D<raster::LayoutTiled4x4>& texture,
         std::size_t width,
-        std::size_t height
+        std::size_t height,
+        const raster::render::FreeLookCamera& camera,
+        std::string_view label,
+        std::size_t warmups,
+        std::size_t measured
     ) {
-        constexpr raster::render::FreeLookCamera camera{
-            .position = raster::Vec3f{.x = 0.0F, .y = 0.0F, .z = 3.0F},
-            .yaw = 0.0F,
-            .pitch = 0.0F,
-        };
-
         constexpr std::array<std::size_t, 4> concurrency_levels{1U, 2U, 4U, 8U};
         raster::Framebuffer serial_framebuffer{width, height};
         const auto render_serial = [&] noexcept {
@@ -248,13 +247,16 @@ namespace {
             );
         };
 
-        const auto serial_median = benchmark_frame_times(render_serial, "serial render failed");
+        const auto serial_median =
+            benchmark_frame_times(render_serial, "serial render failed", warmups, measured);
         std::println(
-            "serial tiled-layout baseline: {} triangles at {}x{}, median {:.3f} ms/frame (7 runs)",
+            "serial {}: {} triangles at {}x{}, median {:.3f} ms/frame ({} runs)",
+            label,
             mesh.triangle_count(),
             width,
             height,
-            static_cast<double>(serial_median) / 1.0e6
+            static_cast<double>(serial_median) / 1.0e6,
+            measured
         );
         for (const auto concurrency : concurrency_levels) {
             raster::render::TileRenderer renderer{concurrency};
@@ -274,14 +276,56 @@ namespace {
             };
 
             const auto threaded_median =
-                benchmark_frame_times(render_threaded, "threaded render failed");
+                benchmark_frame_times(render_threaded, "threaded render failed", warmups, measured);
             std::println(
-                "tile concurrency {}: median {:.3f} ms/frame, {:.2f}x serial (7 runs)",
+                "tile concurrency {}: median {:.3f} ms/frame, {:.2f}x serial ({} runs)",
                 concurrency,
                 static_cast<double>(threaded_median) / 1.0e6,
-                static_cast<double>(serial_median) / static_cast<double>(threaded_median)
+                static_cast<double>(serial_median) / static_cast<double>(threaded_median),
+                measured
             );
         }
+    }
+
+    void benchmark_scene_threads(
+        const raster::SoAMesh& mesh,
+        const raster::Texture2D<raster::LayoutTiled4x4>& texture,
+        std::size_t width,
+        std::size_t height
+    ) {
+        constexpr raster::render::FreeLookCamera camera{
+            .position = raster::Vec3f{.x = 0.0F, .y = 0.0F, .z = 3.0F},
+            .yaw = 0.0F,
+            .pitch = 0.0F,
+        };
+        benchmark_thread_scaling(
+            mesh,
+            texture,
+            width,
+            height,
+            camera,
+            "tiled-layout baseline",
+            2U,
+            7U
+        );
+    }
+
+    void benchmark_scene_stress(
+        const raster::Texture2D<raster::LayoutTiled4x4>& texture,
+        std::size_t width,
+        std::size_t height,
+        std::size_t columns
+    ) {
+        // Heavy-vertex floor viewed at a grazing angle: prepares and bins
+        // columns x columns x 2 triangles, exercising prepare/bin scaling
+        // plus minified UVs and mip paths in rasterization.
+        const auto mesh = raster::make_grid_mesh(columns, columns, 30.0F, -0.5F, -90.0F, 8.0F);
+        constexpr raster::render::FreeLookCamera camera{
+            .position = raster::Vec3f{.x = 0.0F, .y = 6.0F, .z = 6.0F},
+            .yaw = 0.0F,
+            .pitch = -0.19F,
+        };
+        benchmark_thread_scaling(mesh, texture, width, height, camera, "grid stress", 1U, 3U);
     }
 
     [[nodiscard]]
@@ -310,7 +354,12 @@ int main(int argc, char* argv[]) noexcept {
         const auto sequential_order = make_quad_order(false);
         const auto randomized_order = make_quad_order(true);
         const auto first_argument = argc > 1 ? std::string_view{argv[1]} : std::string_view{};
-        const auto selected_mode = first_argument == "scene" || first_argument == "scene-threads"
+        const auto selected_mode = first_argument
+                == "scene"
+                || first_argument
+                == "scene-threads"
+                || first_argument
+                == "scene-stress"
             ? first_argument
             : std::string_view{"fetch"};
 
@@ -323,7 +372,42 @@ int main(int argc, char* argv[]) noexcept {
         const auto selected_order = argc > order_argument_index
             ? std::string_view{argv[order_argument_index]}
             : std::string_view{};
-        if (selected_mode == "scene" || selected_mode == "scene-threads") {
+        if (selected_mode
+            == "scene"
+            || selected_mode
+            == "scene-threads"
+            || selected_mode
+            == "scene-stress") {
+            auto checker_image = make_checker_4k();
+            const raster::Texture2D<std::layout_right> row_major_texture{checker_image};
+            const raster::Texture2D<raster::LayoutTiled4x4> tiled_texture{checker_image};
+            const raster::Texture2D<raster::LayoutMorton> morton_texture{checker_image};
+            if (selected_mode == "scene-stress") {
+                const auto parse_extent = [&](int index, std::size_t fallback) noexcept {
+                    if (argc <= index) {
+                        return fallback;
+                    }
+
+                    const auto parsed = std::string_view(argv[index]);
+                    std::size_t value = 0;
+                    for (const auto digit : parsed) {
+                        if (digit < '0' || digit > '9') {
+                            return fallback;
+                        }
+                        value = value * 10U + static_cast<std::size_t>(digit - '0');
+                    }
+                    return value == 0U ? fallback : value;
+                };
+
+                benchmark_scene_stress(
+                    tiled_texture,
+                    parse_extent(3, 1920U),
+                    parse_extent(4, 1080U),
+                    parse_extent(2, 224U)
+                );
+                return 0;
+            }
+
             const auto mesh_result = raster::load_obj(
                 std::filesystem::path{RASTER_ASSET_DIR} / "models/clipping_sphere.obj"
             );
@@ -331,10 +415,6 @@ int main(int argc, char* argv[]) noexcept {
                 throw std::runtime_error("could not load bundled clipping sphere OBJ");
             }
 
-            auto checker_image = make_checker_4k();
-            const raster::Texture2D<std::layout_right> row_major_texture{checker_image};
-            const raster::Texture2D<raster::LayoutTiled4x4> tiled_texture{checker_image};
-            const raster::Texture2D<raster::LayoutMorton> morton_texture{checker_image};
             constexpr std::size_t viewport_width = 640U;
             constexpr std::size_t viewport_height = 480U;
             if (selected_mode == "scene-threads") {
@@ -387,7 +467,7 @@ int main(int argc, char* argv[]) noexcept {
             return 0;
         }
         if (selected_mode != "fetch") {
-            report_failure("mode must be fetch, scene, or scene-threads");
+            report_failure("mode must be fetch, scene, scene-threads, or scene-stress");
             return 2;
         }
         if ((!selected_order.empty()

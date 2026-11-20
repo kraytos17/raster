@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -16,6 +17,28 @@ namespace raster {
         std::size_t height{};
         std::vector<std::uint32_t> texels{};
     };
+
+    // Round-half-up quantization for non-negative bounded channel values in
+    // [0, 255]. Truncating (value + 0.5F) is exact for every float32 input in
+    // that domain, matching std::lround without the out-of-line libm call.
+    // Single home for the rounding idiom used by texture filtering and
+    // color output.
+    [[nodiscard]]
+    inline std::uint32_t quantize_channel(float value) noexcept {
+        // NOLINTNEXTLINE(bugprone-incorrect-roundings): non-negative bounded domain is exact.
+        return static_cast<std::uint32_t>(value + 0.5F);
+    }
+
+    // Packs four float channels into 0xAARRGGBB with one rounding each.
+    [[nodiscard]]
+    inline std::uint32_t pack_channels(const std::array<float, 4>& channels) noexcept {
+        std::uint32_t result = 0;
+        for (std::size_t channel = 0; channel < 4U; ++channel) {
+            const auto shift = static_cast<std::uint32_t>(channel * 8U);
+            result |= (quantize_channel(channels[channel]) & 0xFFU) << shift;
+        }
+        return result;
+    }
 
     template <typename Layout = std::layout_right> class Texture2D {
     public:
@@ -84,15 +107,23 @@ namespace raster {
             const auto low_level = static_cast<std::size_t>(std::floor(clamped_lod));
             const auto high_level = std::min(low_level + 1U, levels_.size() - 1U);
             const auto fraction = clamped_lod - static_cast<float>(low_level);
-            const auto low = sample_bilinear(u, v, low_level);
-            const auto high = sample_bilinear(u, v, high_level);
-            return blend_color(low, high, fraction);
+            const auto low = sample_bilinear_channels(u, v, low_level);
+            const auto high = sample_bilinear_channels(u, v, high_level);
+            std::array<float, 4> mixed{};
+            for (std::size_t channel = 0; channel < 4U; ++channel) {
+                mixed[channel] = low[channel] + (high[channel] - low[channel]) * fraction;
+            }
+            return pack_channels(mixed);
         }
 
     private:
 
+        // Bilinear interpolation in float: the four corner weights are
+        // non-negative and sum to 1, so each channel stays in [0, 255].
         [[nodiscard]]
-        std::uint32_t sample_bilinear(float u, float v, std::size_t mip_level) const noexcept {
+        std::array<float, 4> sample_bilinear_channels(
+            float u, float v, std::size_t mip_level
+        ) const noexcept {
             const auto& mip = levels_[std::min(mip_level, levels_.size() - 1U)];
             const auto wrap = [](float coordinate) noexcept {
                 return coordinate - std::floor(coordinate);
@@ -107,9 +138,13 @@ namespace raster {
             const typename View::mapping_type mapping{Extents{mip.height, mip.width}};
             const auto wrap_index = [](std::int64_t value, std::size_t extent) noexcept {
                 const auto signed_extent = static_cast<std::int64_t>(extent);
-                return static_cast<std::size_t>(
-                    (value % signed_extent + signed_extent) % signed_extent
-                );
+                if (value < 0) {
+                    return static_cast<std::size_t>(value + signed_extent);
+                }
+                if (value >= signed_extent) {
+                    return static_cast<std::size_t>(value - signed_extent);
+                }
+                return static_cast<std::size_t>(value);
             };
 
             const auto c00 =
@@ -125,21 +160,20 @@ namespace raster {
                 wrap_index(base_x + 1, mip.width)
             )];
 
-            const auto top = blend_color(c00, c10, fraction_x);
-            const auto bottom = blend_color(c01, c11, fraction_x);
-            return blend_color(top, bottom, fraction_y);
-        }
-
-        [[nodiscard]]
-        static std::uint32_t blend_color(std::uint32_t a, std::uint32_t b, float t) noexcept {
-            std::uint32_t result = 0;
+            // Single-pass bilinear: one rounding per channel at pack time.
+            const auto wx0 = 1.0F - fraction_x;
+            const auto wy0 = 1.0F - fraction_y;
+            std::array<float, 4> result{};
             for (std::size_t channel = 0; channel < 4U; ++channel) {
                 const auto shift = static_cast<std::uint32_t>(channel * 8U);
-                const auto left = static_cast<float>((a >> shift) & 0xFFU);
-                const auto right = static_cast<float>((b >> shift) & 0xFFU);
-                const auto value =
-                    static_cast<std::uint32_t>(std::lround(left + (right - left) * t));
-                result |= (value & 0xFFU) << shift;
+                const auto v00 = static_cast<float>((c00 >> shift) & 0xFFU);
+                const auto v10 = static_cast<float>((c10 >> shift) & 0xFFU);
+                const auto v01 = static_cast<float>((c01 >> shift) & 0xFFU);
+                const auto v11 = static_cast<float>((c11 >> shift) & 0xFFU);
+                result[channel] = (v00 * wx0 + v10 * fraction_x)
+                    * wy0
+                    + (v01 * wx0 + v11 * fraction_x)
+                    * fraction_y;
             }
             return result;
         }
@@ -225,7 +259,11 @@ namespace raster {
         const auto dx_y = derivatives.duv_dx.y * static_cast<float>(texture_height);
         const auto dy_x = derivatives.duv_dy.x * static_cast<float>(texture_width);
         const auto dy_y = derivatives.duv_dy.y * static_cast<float>(texture_height);
-        const auto rho = std::max(std::hypot(dx_x, dx_y), std::hypot(dy_x, dy_y));
+        const auto vector_length = [](float x, float y) noexcept {
+            return std::sqrt(x * x + y * y);
+        };
+
+        const auto rho = std::max(vector_length(dx_x, dx_y), vector_length(dy_x, dy_y));
         return std::max(std::log2(std::max(rho, 1.0F)), 0.0F);
     }
 } // namespace raster

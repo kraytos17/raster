@@ -103,6 +103,13 @@ texture-benchmark-scene *args: (_build preset 'raster_texture_benchmark')
 texture-benchmark-threads: (_build preset 'raster_texture_benchmark')
     ./{{ build_dir }}/raster_texture_benchmark scene-threads
 
+# Large-triangle stress scene (grid floor at 1080p by default) across worker counts.
+# Optional args: `scene-stress [columns [width height]]` to scale vertex load
+# (prepare/bin, serial) separately from pixel load (rasterization, parallel).
+[positional-arguments]
+texture-benchmark-stress *args: (_build preset 'raster_texture_benchmark')
+    ./{{ build_dir }}/raster_texture_benchmark scene-stress {{ args }}
+
 # Reformat all project C++ files.
 format: (_build preset 'format')
 

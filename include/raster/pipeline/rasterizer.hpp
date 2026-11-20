@@ -86,7 +86,7 @@ namespace raster {
         std::array<std::int64_t, 3> row_start{}; // edge values at (min_x, min_y) center
         std::array<std::int64_t, 3> step_x{}; // delta for one pixel right
         std::array<std::int64_t, 3> step_y{}; // delta for one pixel down
-        std::array<std::int64_t, 3> bias{}; // top-left fill bias (0 or -1)
+        std::array<std::int64_t, 3> bias{}; // top-left fill bias (0 or +1)
         std::array<float, 3> inv_w{1.0F, 1.0F, 1.0F};
         std::array<float, 3> z_ndc{};
         float inv_area{};
@@ -116,18 +116,66 @@ namespace raster {
             return floor_div(fixed_x - subpixel_center_offset, subpixel_scale);
         }
 
+        // A pixel center is covered when all biased edge values are on the
+        // interior side. Interior edge values are <= 0 for front-facing
+        // triangles (negative twice-signed area), so the test is <= 0.
         [[nodiscard]]
         constexpr bool covers_pixel(
             const std::array<std::int64_t, 3>& edge, const std::array<std::int64_t, 3>& bias
         ) noexcept {
-            return (edge[0] + bias[0]) >= 0 && (edge[1] + bias[1]) >= 0 && (edge[2] + bias[2]) >= 0;
+            return (edge[0] + bias[0]) <= 0 && (edge[1] + bias[1]) <= 0 && (edge[2] + bias[2]) <= 0;
+        }
+
+        // Conservative trivial-coverage test for a half-open pixel region
+        // [x_begin, x_end) x [y_begin, y_end): true only if every pixel
+        // center in the region passes the biased edge tests. Linearity of
+        // the edge functions means the four extreme centers decide it.
+        [[nodiscard]]
+        inline bool region_is_trivially_covered(
+            const ScreenTriangle& triangle,
+            std::int32_t x_begin,
+            std::int32_t y_begin,
+            std::int32_t x_end,
+            std::int32_t y_end
+        ) noexcept {
+            if (x_begin >= x_end || y_begin >= y_end) {
+                return false;
+            }
+
+            const std::array<std::int64_t, 4> corner_dx{
+                static_cast<std::int64_t>(x_begin - triangle.min_x),
+                static_cast<std::int64_t>(x_end - 1 - triangle.min_x),
+                static_cast<std::int64_t>(x_begin - triangle.min_x),
+                static_cast<std::int64_t>(x_end - 1 - triangle.min_x),
+            };
+            const std::array<std::int64_t, 4> corner_dy{
+                static_cast<std::int64_t>(y_begin - triangle.min_y),
+                static_cast<std::int64_t>(y_begin - triangle.min_y),
+                static_cast<std::int64_t>(y_end - 1 - triangle.min_y),
+                static_cast<std::int64_t>(y_end - 1 - triangle.min_y),
+            };
+            for (const auto corner : std::views::iota(std::size_t{0}, std::size_t{4})) {
+                for (const auto edge_index : std::views::iota(std::size_t{0}, std::size_t{3})) {
+                    const auto value = triangle.row_start[edge_index]
+                        + triangle.step_x[edge_index]
+                        * corner_dx[corner]
+                        + triangle.step_y[edge_index]
+                        * corner_dy[corner];
+                    if (value + triangle.bias[edge_index] > 0) {
+                        return false;
+                    }
+                }
+            }
+            return true;
         }
     } // namespace detail
 
     // Builds the screen-space setup for triangle A -> B -> C from post-viewport
     // pixel coordinates plus per-vertex cached inv_w (1/w_c) and reverse-Z NDC
-    // depth. Returns SetupError::Backfacing for negative twice-signed area
-    // (plan: cull when area_fx <= 0) and Degenerate for zero area.
+    // depth. Front-facing triangles are counter-clockwise as seen in NDC
+    // (y-up), which is negative shoelace area in y-down pixels. Returns
+    // SetupError::Backfacing for positive twice-signed area and Degenerate
+    // for zero area.
     [[nodiscard]]
     inline std::expected<ScreenTriangle, SetupError> make_screen_triangle(
         ScreenPoint a,
@@ -146,7 +194,7 @@ namespace raster {
         if (area == 0) {
             return std::unexpected{SetupError::Degenerate};
         }
-        if (area < 0) {
+        if (area > 0) {
             return std::unexpected{SetupError::Backfacing};
         }
 
@@ -330,6 +378,12 @@ namespace raster {
         }
 
         Fragment fragment_callback = std::forward<Fragment>(fragment);
+        // Trivially covered regions skip per-quad biased edge tests: every
+        // pixel center in [x_begin, x_end) x [y_begin, y_end) is covered, so
+        // full quads take coverage 0xF and edge quads mask to region bounds.
+        // Corner edge values are still evaluated for barycentrics/depth.
+        const bool trivially_covered =
+            detail::region_is_trivially_covered(triangle, x_begin, y_begin, x_end, y_end);
         // Align quads to the framebuffer's even pixel grid so a triangle can be
         // split across tile boundaries without changing helper-lane derivatives.
         const auto quad_x_begin = detail::floor_div(x_begin, 2) * 2;
@@ -363,20 +417,28 @@ namespace raster {
                     corner_edges[3][edge_index] =
                         corner_edges[1][edge_index] + triangle.step_y[edge_index];
                 }
-                if (detail::covers_pixel(corner_edges[0], triangle.bias)) {
+                if (trivially_covered ? quad_x >= x_begin
+                                      : detail::covers_pixel(corner_edges[0], triangle.bias)) {
                     coverage_mask |= 0x1U;
                 }
-                if (quad_width == 2 && detail::covers_pixel(corner_edges[1], triangle.bias)) {
+                if (quad_width
+                    == 2
+                    && (trivially_covered ? quad_x + 1 >= x_begin
+                                          : detail::covers_pixel(corner_edges[1], triangle.bias))) {
                     coverage_mask |= 0x2U;
                 }
-                if (quad_height == 2 && detail::covers_pixel(corner_edges[2], triangle.bias)) {
+                if (quad_height
+                    == 2
+                    && (trivially_covered ? quad_y >= y_begin
+                                          : detail::covers_pixel(corner_edges[2], triangle.bias))) {
                     coverage_mask |= 0x4U;
                 }
                 if (quad_width
                     == 2
                     && quad_height
                     == 2
-                    && detail::covers_pixel(corner_edges[3], triangle.bias)) {
+                    && (trivially_covered ? quad_x + 1 >= x_begin && quad_y + 1 >= y_begin
+                                          : detail::covers_pixel(corner_edges[3], triangle.bias))) {
                     coverage_mask |= 0x8U;
                 }
                 if (coverage_mask == 0) {

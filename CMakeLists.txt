@@ -61,6 +61,7 @@ target_sources(raster_engine INTERFACE
         include/raster/io/obj_loader.hpp
         include/raster/io/tga_loader.hpp
         include/raster/memory/framebuffer.hpp
+        include/raster/memory/grid_mesh.hpp
         include/raster/memory/soa_mesh.hpp
         include/raster/memory/texture.hpp
         include/raster/memory/texture_layout.hpp

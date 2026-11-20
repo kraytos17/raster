@@ -112,8 +112,8 @@ namespace {
         constexpr std::size_t height = 24U;
         const auto triangle = raster::make_screen_triangle(
             raster::ScreenPoint{.x = 2.0F, .y = 1.0F},
-            raster::ScreenPoint{.x = 36.0F, .y = 3.0F},
-            raster::ScreenPoint{.x = 8.0F, .y = 22.0F}
+            raster::ScreenPoint{.x = 8.0F, .y = 22.0F},
+            raster::ScreenPoint{.x = 36.0F, .y = 3.0F}
         );
         REQUIRE(triangle.has_value());
 
@@ -174,6 +174,119 @@ namespace {
 
         REQUIRE(tiled == serial);
         REQUIRE(std::ranges::all_of(tiled, [](std::uint32_t count) { return count <= 1U; }));
+    }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE("trivially covered region is detected conservatively", "[tile][rasterizer]") {
+        const auto big = raster::make_screen_triangle(
+            raster::ScreenPoint{.x = -10.0F, .y = -10.0F},
+            raster::ScreenPoint{.x = -10.0F, .y = 80.0F},
+            raster::ScreenPoint{.x = 80.0F, .y = -10.0F}
+        );
+        REQUIRE(big.has_value());
+        REQUIRE(raster::detail::region_is_trivially_covered(*big, 0, 0, 16, 16));
+        REQUIRE(raster::detail::region_is_trivially_covered(*big, 16, 16, 32, 32));
+        REQUIRE_FALSE(raster::detail::region_is_trivially_covered(*big, 0, 0, 64, 128));
+
+        const auto small = raster::make_screen_triangle(
+            raster::ScreenPoint{.x = 0.0F, .y = 0.0F},
+            raster::ScreenPoint{.x = 0.0F, .y = 4.0F},
+            raster::ScreenPoint{.x = 4.0F, .y = 0.0F}
+        );
+        REQUIRE(small.has_value());
+        REQUIRE_FALSE(raster::detail::region_is_trivially_covered(*small, 0, 0, 16, 16));
+        REQUIRE_FALSE(raster::detail::region_is_trivially_covered(*small, 8, 8, 0, 0));
+    }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE("fully covered tiles match serial rasterization exactly", "[tile][rasterizer]") {
+        constexpr std::size_t width = 32U;
+        constexpr std::size_t height = 32U;
+        const auto triangle = raster::make_screen_triangle(
+            raster::ScreenPoint{.x = -10.0F, .y = -10.0F},
+            raster::ScreenPoint{.x = -10.0F, .y = 80.0F},
+            raster::ScreenPoint{.x = 80.0F, .y = -10.0F}
+        );
+        REQUIRE(triangle.has_value());
+        for (std::size_t tile = 0U; tile < 4U; ++tile) {
+            const auto tile_x = tile % 2U;
+            const auto tile_y = tile / 2U;
+            REQUIRE(
+                raster::detail::region_is_trivially_covered(
+                    *triangle,
+                    static_cast<std::int32_t>(tile_x * raster::raster_tile_size),
+                    static_cast<std::int32_t>(tile_y * raster::raster_tile_size),
+                    static_cast<std::int32_t>((tile_x + 1U) * raster::raster_tile_size),
+                    static_cast<std::int32_t>((tile_y + 1U) * raster::raster_tile_size)
+                )
+            );
+        }
+
+        std::vector<std::uint32_t> serial(width * height, 0U);
+        std::vector<std::uint32_t> tiled(width * height, 0U);
+        raster::rasterize_triangle_quads(
+            *triangle,
+            width,
+            height,
+            [&](std::size_t x, std::size_t y, const raster::QuadBarycentrics& quad) noexcept {
+            for (const auto lane : std::views::iota(std::size_t{0}, std::size_t{4})) {
+                if ((quad.visible_mask & (1U << lane)) != 0U) {
+                    const auto px = x + (lane & 1U);
+                    const auto py = y + (lane >> 1U);
+                    serial[py * width + px] = 1U;
+                }
+            }
+        }
+        );
+        for (std::size_t tile_y = 0U; tile_y < 2U; ++tile_y) {
+            for (std::size_t tile_x = 0U; tile_x < 2U; ++tile_x) {
+                const raster::RasterRegion region{
+                    .min_x = tile_x * raster::raster_tile_size,
+                    .min_y = tile_y * raster::raster_tile_size,
+                    .max_x = (tile_x + 1U) * raster::raster_tile_size,
+                    .max_y = (tile_y + 1U) * raster::raster_tile_size,
+                };
+                raster::rasterize_triangle_quads(
+                    *triangle,
+                    width,
+                    height,
+                    std::nullopt,
+                    [&](std::size_t x,
+                        std::size_t y,
+                        const raster::QuadBarycentrics& quad) noexcept {
+                    for (const auto lane : std::views::iota(std::size_t{0}, std::size_t{4})) {
+                        if ((quad.visible_mask & (1U << lane)) != 0U) {
+                            const auto px = x + (lane & 1U);
+                            const auto py = y + (lane >> 1U);
+                            ++tiled[py * width + px];
+                        }
+                    }
+                },
+                    region
+                );
+            }
+        }
+
+        REQUIRE(tiled == serial);
+        REQUIRE(std::ranges::all_of(tiled, [](std::uint32_t count) { return count <= 1U; }));
+    }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE("NDC counter-clockwise winding is front-facing", "[rasterizer][winding]") {
+        // In y-down pixels this triangle has negative shoelace area, which is
+        // counter-clockwise as seen in NDC (y-up): the front-facing order.
+        const auto front = raster::make_screen_triangle(
+            raster::ScreenPoint{.x = 10.0F, .y = 30.0F},
+            raster::ScreenPoint{.x = 70.0F, .y = 30.0F},
+            raster::ScreenPoint{.x = 40.0F, .y = 5.0F}
+        );
+        REQUIRE(front.has_value());
+        const auto back = raster::make_screen_triangle(
+            raster::ScreenPoint{.x = 10.0F, .y = 30.0F},
+            raster::ScreenPoint{.x = 40.0F, .y = 5.0F},
+            raster::ScreenPoint{.x = 70.0F, .y = 30.0F}
+        );
+        REQUIRE_FALSE(back.has_value());
     }
 
     // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
@@ -269,7 +382,7 @@ namespace {
 
     // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
     TEST_CASE("top-left rule classifies top and left edges", "[barycentric][fill]") {
-        // Positive-shoelace (front-facing) edges only.
+        // Edge-direction classification is winding-independent.
         REQUIRE(raster::is_top_or_left_edge(0, 0, 16, 0)); // horizontal, interior below
         REQUIRE_FALSE(raster::is_top_or_left_edge(16, 0, 0, 0)); // horizontal, interior above
         REQUIRE_FALSE(raster::is_top_or_left_edge(0, 0, 16, 16)); // down-right diagonal
@@ -277,15 +390,24 @@ namespace {
         REQUIRE_FALSE(raster::is_top_or_left_edge(0, 0, 0, 16)); // down vertical
         REQUIRE(raster::is_top_or_left_edge(0, 16, 0, 0)); // up vertical
         REQUIRE(raster::edge_bias(0, 0, 16, 0) == 0);
-        REQUIRE(raster::edge_bias(0, 0, 16, 16) == -1);
+        REQUIRE(raster::edge_bias(0, 0, 16, 16) == 1);
     }
 
     // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
     TEST_CASE("backfacing and degenerate triangles are culled", "[rasterizer][setup]") {
-        const auto backfacing = raster::make_screen_triangle(
+        // Negative shoelace in y-down pixels is counter-clockwise as seen in
+        // NDC: the front-facing order. Positive shoelace is culled.
+        const auto front_facing = raster::make_screen_triangle(
             raster::ScreenPoint{.x = 0.0F, .y = 0.0F},
             raster::ScreenPoint{.x = 0.0F, .y = 4.0F},
             raster::ScreenPoint{.x = 4.0F, .y = 0.0F}
+        );
+        REQUIRE(front_facing.has_value());
+
+        const auto backfacing = raster::make_screen_triangle(
+            raster::ScreenPoint{.x = 0.0F, .y = 0.0F},
+            raster::ScreenPoint{.x = 4.0F, .y = 0.0F},
+            raster::ScreenPoint{.x = 0.0F, .y = 4.0F}
         );
         REQUIRE_FALSE(backfacing.has_value());
         REQUIRE(backfacing.error() == raster::SetupError::Backfacing);
@@ -359,9 +481,9 @@ namespace {
                 };
                 const raster::ScreenPoint bottom_left{.x = grid_x[column], .y = grid_y[row + 1]};
 
-                const auto upper = raster::make_screen_triangle(top_left, top_right, bottom_right);
+                const auto upper = raster::make_screen_triangle(top_left, bottom_right, top_right);
                 const auto lower =
-                    raster::make_screen_triangle(top_left, bottom_right, bottom_left);
+                    raster::make_screen_triangle(top_left, bottom_left, bottom_right);
                 REQUIRE(upper.has_value());
                 REQUIRE(lower.has_value());
 
@@ -394,7 +516,7 @@ namespace {
     // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
     TEST_CASE("vertical seam center column is drawn exactly once", "[rasterizer][watertight]") {
         // Two triangles sharing the vertical edge x = 0.5 px, which passes
-        // exactly through the centers of pixel column x = 0. The right-hand
+        // exactly through the centers of pixel column x = 0. The left-hand
         // triangle traverses that edge upward (a left edge), so the top-left
         // rule assigns the seam column to it.
         constexpr std::size_t size = 8;
@@ -402,13 +524,13 @@ namespace {
 
         const auto left = raster::make_screen_triangle(
             raster::ScreenPoint{.x = 0.0F, .y = 0.0F},
-            raster::ScreenPoint{.x = 0.5F, .y = 0.0F},
-            raster::ScreenPoint{.x = 0.5F, .y = 4.0F}
+            raster::ScreenPoint{.x = 0.5F, .y = 4.0F},
+            raster::ScreenPoint{.x = 0.5F, .y = 0.0F}
         );
         const auto right = raster::make_screen_triangle(
             raster::ScreenPoint{.x = 0.5F, .y = 0.0F},
-            raster::ScreenPoint{.x = 4.0F, .y = 2.0F},
-            raster::ScreenPoint{.x = 0.5F, .y = 4.0F}
+            raster::ScreenPoint{.x = 0.5F, .y = 4.0F},
+            raster::ScreenPoint{.x = 4.0F, .y = 2.0F}
         );
         REQUIRE(left.has_value());
         REQUIRE(right.has_value());
@@ -436,7 +558,7 @@ namespace {
         }
         for (const auto y : std::views::iota(std::size_t{0}, std::size_t{4})) {
             REQUIRE(counters.counts[y * size + 0] == 1);
-            REQUIRE(counters.owner[y * size + 0] == 2);
+            REQUIRE(counters.owner[y * size + 0] == 1);
         }
         for (const auto y : std::views::iota(std::size_t{4}, size)) {
             REQUIRE(counters.counts[y * size + 0] == 0);
@@ -446,20 +568,20 @@ namespace {
     // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
     TEST_CASE("horizontal seam center row is drawn exactly once", "[rasterizer][watertight]") {
         // Two triangles sharing the horizontal edge y = 0.5 px, which passes
-        // exactly through the centers of pixel row y = 0. The lower triangle
+        // exactly through the centers of pixel row y = 0. The upper triangle
         // traverses that edge rightward (a top edge), so it owns the seam row.
         constexpr std::size_t size = 8;
         CoverageCounters counters{size, size};
 
         const auto upper = raster::make_screen_triangle(
             raster::ScreenPoint{.x = 0.0F, .y = 0.5F},
-            raster::ScreenPoint{.x = 2.0F, .y = -2.5F},
-            raster::ScreenPoint{.x = 4.0F, .y = 0.5F}
+            raster::ScreenPoint{.x = 4.0F, .y = 0.5F},
+            raster::ScreenPoint{.x = 2.0F, .y = -2.5F}
         );
         const auto lower = raster::make_screen_triangle(
             raster::ScreenPoint{.x = 0.0F, .y = 0.5F},
-            raster::ScreenPoint{.x = 4.0F, .y = 0.5F},
-            raster::ScreenPoint{.x = 2.0F, .y = 3.5F}
+            raster::ScreenPoint{.x = 2.0F, .y = 3.5F},
+            raster::ScreenPoint{.x = 4.0F, .y = 0.5F}
         );
         REQUIRE(upper.has_value());
         REQUIRE(lower.has_value());
@@ -487,7 +609,7 @@ namespace {
         }
         for (const auto x : std::views::iota(std::size_t{0}, std::size_t{4})) {
             REQUIRE(counters.counts[x] == 1);
-            REQUIRE(counters.owner[x] == 2);
+            REQUIRE(counters.owner[x] == 1);
         }
     }
 
@@ -500,8 +622,8 @@ namespace {
 
         const auto wide = raster::make_screen_triangle(
             raster::ScreenPoint{.x = -8192.0F, .y = 100.0F},
-            raster::ScreenPoint{.x = 8192.0F, .y = 100.0F},
-            raster::ScreenPoint{.x = 0.0F, .y = 8192.0F}
+            raster::ScreenPoint{.x = 0.0F, .y = 8192.0F},
+            raster::ScreenPoint{.x = 8192.0F, .y = 100.0F}
         );
         REQUIRE(wide.has_value());
 
@@ -539,8 +661,8 @@ namespace {
 
         const auto triangle = raster::make_screen_triangle(
             raster::ScreenPoint{.x = 10.25F, .y = 10.25F},
-            raster::ScreenPoint{.x = 30.25F, .y = 10.25F},
             raster::ScreenPoint{.x = 20.25F, .y = 30.25F},
+            raster::ScreenPoint{.x = 30.25F, .y = 10.25F},
             std::array<float, 3>{1.0F, 1.0F, 1.0F},
             std::array<float, 3>{0.25F, 0.5F, 0.75F}
         );
@@ -573,8 +695,8 @@ namespace {
 
         const auto triangle = raster::make_screen_triangle(
             raster::ScreenPoint{.x = 10.25F, .y = 10.25F},
-            raster::ScreenPoint{.x = 30.25F, .y = 10.25F},
             raster::ScreenPoint{.x = 20.25F, .y = 30.25F},
+            raster::ScreenPoint{.x = 30.25F, .y = 10.25F},
             std::array<float, 3>{1.0F, 0.5F, 2.0F},
             std::array<float, 3>{0.25F, 0.75F, 0.5F}
         );
@@ -618,15 +740,15 @@ namespace {
 
         const auto far_triangle = raster::make_screen_triangle(
             raster::ScreenPoint{.x = 4.25F, .y = 4.25F},
-            raster::ScreenPoint{.x = 20.25F, .y = 4.25F},
             raster::ScreenPoint{.x = 12.25F, .y = 20.25F},
+            raster::ScreenPoint{.x = 20.25F, .y = 4.25F},
             std::array<float, 3>{1.0F, 1.0F, 1.0F},
             std::array<float, 3>{0.25F, 0.25F, 0.25F}
         );
         const auto near_triangle = raster::make_screen_triangle(
             raster::ScreenPoint{.x = 8.25F, .y = 8.25F},
-            raster::ScreenPoint{.x = 24.25F, .y = 8.25F},
             raster::ScreenPoint{.x = 16.25F, .y = 24.25F},
+            raster::ScreenPoint{.x = 24.25F, .y = 8.25F},
             std::array<float, 3>{1.0F, 1.0F, 1.0F},
             std::array<float, 3>{0.75F, 0.75F, 0.75F}
         );
@@ -689,15 +811,15 @@ namespace {
 
         const auto far_triangle = raster::make_screen_triangle(
             raster::ScreenPoint{.x = 4.25F, .y = 4.25F},
-            raster::ScreenPoint{.x = 20.25F, .y = 4.25F},
             raster::ScreenPoint{.x = 12.25F, .y = 20.25F},
+            raster::ScreenPoint{.x = 20.25F, .y = 4.25F},
             std::array<float, 3>{1.0F, 1.0F, 1.0F},
             std::array<float, 3>{0.25F, 0.25F, 0.25F}
         );
         const auto near_triangle = raster::make_screen_triangle(
             raster::ScreenPoint{.x = 8.25F, .y = 8.25F},
-            raster::ScreenPoint{.x = 24.25F, .y = 8.25F},
             raster::ScreenPoint{.x = 16.25F, .y = 24.25F},
+            raster::ScreenPoint{.x = 24.25F, .y = 8.25F},
             std::array<float, 3>{1.0F, 1.0F, 1.0F},
             std::array<float, 3>{0.75F, 0.75F, 0.75F}
         );
