@@ -3,11 +3,15 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <numbers>
+#include <print>
 #include <ranges>
+#include <SDL3/SDL.h>
 #include <span>
 #include <tuple>
 #include <vector>
@@ -24,6 +28,8 @@
 
 namespace raster::render {
     namespace {
+        using std::chrono::steady_clock;
+
         struct Rgb {
             float r{};
             float g{};
@@ -95,6 +101,10 @@ namespace raster::render {
 
         static_assert(ShaderProgram<FloorShader<LayoutTiled4x4>>);
 
+        // Overdraw probe accumulators.
+        inline std::atomic_uint64_t profile_covered_lanes{0};
+        inline std::atomic_uint64_t profile_visible_lanes{0};
+
         // Shared quad store: one wide trilinear sample per quad for the
         // textured path (scalar gathers, wide blend/mix/pack), scalar
         // fragment loop for solid-debug and checker fallbacks.
@@ -108,6 +118,18 @@ namespace raster::render {
             const std::array<Vec2f, 4>& quad_uv,
             float lod
         ) noexcept {
+            static const bool profile =
+                SDL_GetEnvironmentVariable(SDL_GetEnvironment(), "RASTER_PROFILE") != nullptr;
+            if (profile) {
+                profile_covered_lanes.fetch_add(
+                    static_cast<std::uint64_t>(std::popcount(quad.coverage_mask)),
+                    std::memory_order_relaxed
+                );
+                profile_visible_lanes.fetch_add(
+                    static_cast<std::uint64_t>(std::popcount(quad.visible_mask)),
+                    std::memory_order_relaxed
+                );
+            }
             if (!shader.uniforms.solid_color_debug && shader.uniforms.texture != nullptr) {
                 std::array<float, 4> u{};
                 std::array<float, 4> v{};
@@ -490,6 +512,14 @@ namespace raster::render {
             }
 
             std::atomic_bool prepared_ok{true};
+            const bool profile =
+                SDL_GetEnvironmentVariable(SDL_GetEnvironment(), "RASTER_PROFILE") != nullptr;
+            if (profile) {
+                profile_covered_lanes.store(0, std::memory_order_relaxed);
+                profile_visible_lanes.store(0, std::memory_order_relaxed);
+            }
+
+            const auto timestamp_prepare_begin = steady_clock::now();
             tile_state.executor.execute(worker_count, [&](std::size_t worker) noexcept {
                 auto& chunk = tile_state.thread_prepared[worker];
                 chunk.clear();
@@ -511,8 +541,10 @@ namespace raster::render {
                 return false;
             }
 
+            const auto timestamp_merge_begin = steady_clock::now();
             auto& prepared = tile_state.prepared;
             auto& setups = tile_state.setups;
+
             prepared.clear();
             setups.clear();
             setups.reserve(prepared.capacity());
@@ -523,7 +555,9 @@ namespace raster::render {
                 }
             }
 
+            const auto timestamp_bin_begin = steady_clock::now();
             bin_triangles(tile_state.setups, width, height, tile_state.bins);
+            const auto timestamp_raster_begin = steady_clock::now();
             tile_state.executor.execute(
                 tile_state.bins.tile_count(),
                 [&](std::size_t tile) noexcept {
@@ -545,6 +579,37 @@ namespace raster::render {
                 }
             }
             );
+            if (profile) {
+                using Milliseconds = std::chrono::duration<double, std::milli>;
+                const auto covered = profile_covered_lanes.load(std::memory_order_relaxed);
+                const auto visible = profile_visible_lanes.load(std::memory_order_relaxed);
+                try {
+                    std::println(
+                        stderr,
+                        "raster: profile prepare {:.2f} ms merge {:.2f} ms bin {:.2f} ms raster {:.2f} ms",
+                        Milliseconds(timestamp_merge_begin - timestamp_prepare_begin).count(),
+                        Milliseconds(timestamp_bin_begin - timestamp_merge_begin).count(),
+                        Milliseconds(timestamp_raster_begin - timestamp_bin_begin).count(),
+                        Milliseconds(std::chrono::steady_clock::now() - timestamp_raster_begin)
+                            .count()
+                    );
+                    std::println(
+                        stderr,
+                        "raster: profile overdraw covered {} visible {} depth-kill {:.1f}%",
+                        covered,
+                        visible,
+                        covered == 0U ? 0.0
+                                      : 100.0
+                                * static_cast<double>(covered - visible)
+                                / static_cast<double>(covered)
+                    );
+                } catch (...) {
+                    try {
+                        std::println(stderr, "raster: profile output failed");
+                    } catch (...) { //NOLINT
+                    }
+                }
+            }
             return true;
         }
     } // namespace
