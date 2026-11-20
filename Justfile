@@ -125,6 +125,13 @@ verify: check-format cppcheck tidy
     cmake --workflow --preset debug-sanitized
     @echo "VERIFY PASSED: format, cppcheck, clang-tidy, ASan/UBSan tests"
 
+# Extended gate: verify plus ThreadSanitizer, allocation stress, and resize gates.
+verify-full: verify tsan
+    cmake --workflow --preset debug-sanitized
+    RASTER_CLIP_STRESS_TEST=1 SDL_VIDEODRIVER=dummy ./build/debug-sanitized/raster
+    RASTER_AUTO_RESIZE_TEST=1 SDL_VIDEODRIVER=dummy ./build/debug-sanitized/raster
+    @echo "VERIFY-FULL PASSED: verify + TSan + clip-stress + resize"
+
 # Install the current build under the CMake default prefix or a supplied path.
 install prefix='': (_build preset)
     cmake --install {{ quote(build_dir) }}{{ if prefix == '' { '' } else { ' --prefix ' + quote(prefix) } }}
