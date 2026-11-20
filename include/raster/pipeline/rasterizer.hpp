@@ -14,6 +14,7 @@
 
 #include "raster/math/barycentric.hpp"
 #include "raster/memory/framebuffer.hpp"
+#include "raster/pipeline/simd_quad.hpp"
 
 namespace raster {
     // Why a triangle was rejected during screen-space setup.
@@ -403,71 +404,15 @@ namespace raster {
         for (std::int32_t quad_y = quad_y_begin; quad_y < y_end; quad_y += 2) {
             const std::int32_t quad_height = std::min(static_cast<std::int32_t>(2), y_end - quad_y);
             std::array<std::int64_t, 3> quad_accumulator = row_accumulator;
-            for (std::int32_t quad_x = quad_x_begin; quad_x < x_end; quad_x += 2) {
-                const std::int32_t quad_width =
-                    std::min(static_cast<std::int32_t>(2), x_end - quad_x);
-                std::uint32_t coverage_mask = 0;
-                std::array<std::array<std::int64_t, 3>, 4> corner_edges{};
-                corner_edges[0] = quad_accumulator;
-                for (const auto edge_index : std::views::iota(std::size_t{0}, std::size_t{3})) {
-                    corner_edges[1][edge_index] =
-                        quad_accumulator[edge_index] + triangle.step_x[edge_index];
-                    corner_edges[2][edge_index] =
-                        quad_accumulator[edge_index] + triangle.step_y[edge_index];
-                    corner_edges[3][edge_index] =
-                        corner_edges[1][edge_index] + triangle.step_y[edge_index];
-                }
-                if (trivially_covered ? quad_x >= x_begin
-                                      : detail::covers_pixel(corner_edges[0], triangle.bias)) {
-                    coverage_mask |= 0x1U;
-                }
-                if (quad_width
-                    == 2
-                    && (trivially_covered ? quad_x + 1 >= x_begin
-                                          : detail::covers_pixel(corner_edges[1], triangle.bias))) {
-                    coverage_mask |= 0x2U;
-                }
-                if (quad_height
-                    == 2
-                    && (trivially_covered ? quad_y >= y_begin
-                                          : detail::covers_pixel(corner_edges[2], triangle.bias))) {
-                    coverage_mask |= 0x4U;
-                }
-                if (quad_width
-                    == 2
-                    && quad_height
-                    == 2
-                    && (trivially_covered ? quad_x + 1 >= x_begin && quad_y + 1 >= y_begin
-                                          : detail::covers_pixel(corner_edges[3], triangle.bias))) {
-                    coverage_mask |= 0x8U;
-                }
-                if (coverage_mask == 0) {
-                    for (const auto edge_index : std::views::iota(std::size_t{0}, std::size_t{3})) {
-                        quad_accumulator[edge_index] += 2 * triangle.step_x[edge_index];
-                    }
-                    continue;
-                }
-
-                // Screen-space weights per covered corner. Edge 0 is A->B and
-                // carries the weight of vertex C, edge 1 (B->C) carries vertex
-                // A, edge 2 (C->A) carries vertex B. The third weight is a
-                // single subtraction from the summed pair, which makes
-                // l0 + l1 + l2 == 1.0F exactly under round-to-nearest
-                // (Sterbenz-exact for s >= 0.5, < half-ulp error below) and
-                // keeps every weight non-negative because the float pair-sum
-                // cannot exceed 1 for interior pixels.
-                std::array<std::array<float, 3>, 4> corner_weights{};
+            // Shades one covered quad: reverse-Z depth test, perspective
+            // recovery of the helper-lane barycentrics, and the fragment
+            // callback. Shared by the scalar path below and the wide
+            // quad-pair path, so both produce identical pixels.
+            const auto shade_covered_quad =
+                [&](std::int32_t quad_origin_x,
+                    const std::array<std::array<float, 3>, 4>& corner_weights,
+                    std::uint32_t coverage_mask) noexcept {
                 std::uint32_t visible_mask = coverage_mask;
-                for (const auto corner : std::views::iota(std::size_t{0}, std::size_t{4})) {
-                    const auto l0 = static_cast<float>(corner_edges[corner][1]) * triangle.inv_area;
-                    const auto l1 = static_cast<float>(corner_edges[corner][2]) * triangle.inv_area;
-                    const auto l0_plus_l1 = l0 + l1;
-                    corner_weights[corner] = std::array<float, 3>{
-                        l0,
-                        l1,
-                        1.0F - l0_plus_l1,
-                    };
-                }
                 if (depth_view.has_value()) {
                     // Quad-level reverse-Z early depth rejection.
                     for (const auto corner : std::views::iota(std::size_t{0}, std::size_t{4})) {
@@ -475,7 +420,7 @@ namespace raster {
                             continue;
                         }
 
-                        const auto corner_x = static_cast<std::size_t>(quad_x)
+                        const auto corner_x = static_cast<std::size_t>(quad_origin_x)
                             + static_cast<std::size_t>(corner & 1U);
                         const auto corner_y = static_cast<std::size_t>(quad_y)
                             + static_cast<std::size_t>(corner >> 1U);
@@ -486,19 +431,13 @@ namespace raster {
                             + corner_weights[corner][2]
                             * triangle.z_ndc[2];
                         if (z_pixel > (*depth_view)[corner_y, corner_x]) {
-                            // Nearer than anything seen so far: claim the depth
-                            // slot before shading.
                             (*depth_view)[corner_y, corner_x] = z_pixel;
                         } else {
                             visible_mask &= static_cast<std::uint32_t>(~(1U << corner));
                         }
                     }
                     if (visible_mask == 0) {
-                        for (const auto edge_index :
-                             std::views::iota(std::size_t{0}, std::size_t{3})) {
-                            quad_accumulator[edge_index] += 2 * triangle.step_x[edge_index];
-                        }
-                        continue;
+                        return;
                     }
                 }
 
@@ -536,15 +475,172 @@ namespace raster {
                         quad_barycentrics.lanes[corner] = quad_barycentrics.lanes[fallback_lane];
                     }
                 }
-
                 fragment_callback(
-                    static_cast<std::size_t>(quad_x),
+                    static_cast<std::size_t>(quad_origin_x),
                     static_cast<std::size_t>(quad_y),
                     quad_barycentrics
                 );
+            };
+
+            const bool use_wide_pairs = simd::cpu_has_avx2();
+            for (std::int32_t quad_x = quad_x_begin; quad_x < x_end;) {
+                const std::int32_t quad_width =
+                    std::min(static_cast<std::int32_t>(2), x_end - quad_x);
+
+                std::uint32_t coverage_mask = 0;
+                std::array<std::array<std::int64_t, 3>, 4> corner_edges{};
+                corner_edges[0] = quad_accumulator;
+                for (const auto edge_index : std::views::iota(std::size_t{0}, std::size_t{3})) {
+                    corner_edges[1][edge_index] =
+                        quad_accumulator[edge_index] + triangle.step_x[edge_index];
+                    corner_edges[2][edge_index] =
+                        quad_accumulator[edge_index] + triangle.step_y[edge_index];
+                    corner_edges[3][edge_index] =
+                        corner_edges[1][edge_index] + triangle.step_y[edge_index];
+                }
+                if (trivially_covered ? quad_x >= x_begin
+                                      : detail::covers_pixel(corner_edges[0], triangle.bias)) {
+                    coverage_mask |= 0x1U;
+                }
+                if (quad_width
+                    == 2
+                    && (trivially_covered ? quad_x + 1 >= x_begin
+                                          : detail::covers_pixel(corner_edges[1], triangle.bias))) {
+                    coverage_mask |= 0x2U;
+                }
+                if (quad_height
+                    == 2
+                    && (trivially_covered ? quad_y >= y_begin
+                                          : detail::covers_pixel(corner_edges[2], triangle.bias))) {
+                    coverage_mask |= 0x4U;
+                }
+                if (quad_width
+                    == 2
+                    && quad_height
+                    == 2
+                    && (trivially_covered ? quad_x + 1 >= x_begin && quad_y + 1 >= y_begin
+                                          : detail::covers_pixel(corner_edges[3], triangle.bias))) {
+                    coverage_mask |= 0x8U;
+                }
+                if (use_wide_pairs
+                    && quad_height
+                    == 2
+                    && quad_width
+                    == 2
+                    && x_end
+                    - quad_x
+                    >= 4
+                    && quad_x
+                    >= x_begin
+                    && quad_y
+                    >= y_begin) {
+                    std::array<std::array<std::int64_t, 3>, 4> corner_edges_b{};
+                    for (const auto edge_index : std::views::iota(std::size_t{0}, std::size_t{3})) {
+                        corner_edges_b[0][edge_index] =
+                            corner_edges[0][edge_index] + 2 * triangle.step_x[edge_index];
+                        corner_edges_b[1][edge_index] =
+                            corner_edges_b[0][edge_index] + triangle.step_x[edge_index];
+                        corner_edges_b[2][edge_index] =
+                            corner_edges_b[0][edge_index] + triangle.step_y[edge_index];
+                        corner_edges_b[3][edge_index] =
+                            corner_edges_b[1][edge_index] + triangle.step_y[edge_index];
+                    }
+
+                    std::uint32_t coverage_mask_b = 0;
+                    if (trivially_covered) {
+                        coverage_mask_b = 0xFU;
+                    } else {
+                        for (const auto corner : std::views::iota(std::size_t{0}, std::size_t{4})) {
+                            if (detail::covers_pixel(corner_edges_b[corner], triangle.bias)) {
+                                coverage_mask_b |= static_cast<std::uint32_t>(1U << corner);
+                            }
+                        }
+                    }
+
+                    if (coverage_mask == 0 && coverage_mask_b == 0) {
+                        for (const auto edge_index :
+                             std::views::iota(std::size_t{0}, std::size_t{3})) {
+                            quad_accumulator[edge_index] += 4 * triangle.step_x[edge_index];
+                        }
+
+                        quad_x += 4;
+                        continue;
+                    }
+
+                    float edge_values_1[8]{};
+                    float edge_values_2[8]{};
+                    for (const auto corner : std::views::iota(std::size_t{0}, std::size_t{4})) {
+                        edge_values_1[corner] = static_cast<float>(corner_edges[corner][1]);
+                        edge_values_2[corner] = static_cast<float>(corner_edges[corner][2]);
+                        edge_values_1[corner + 4U] = static_cast<float>(corner_edges_b[corner][1]);
+                        edge_values_2[corner + 4U] = static_cast<float>(corner_edges_b[corner][2]);
+                    }
+
+                    float lane_l0[8]{};
+                    float lane_l1[8]{};
+                    float lane_l2[8]{};
+                    simd::barycentric_weights8(
+                        edge_values_1,
+                        edge_values_2,
+                        triangle.inv_area,
+                        lane_l0,
+                        lane_l1,
+                        lane_l2
+                    );
+
+                    std::array<std::array<float, 3>, 4> weights_a{};
+                    std::array<std::array<float, 3>, 4> weights_b{};
+                    for (const auto corner : std::views::iota(std::size_t{0}, std::size_t{4})) {
+                        weights_a[corner] = std::array<float, 3>{
+                            lane_l0[corner],
+                            lane_l1[corner],
+                            lane_l2[corner],
+                        };
+                        weights_b[corner] = std::array<float, 3>{
+                            lane_l0[corner + 4U],
+                            lane_l1[corner + 4U],
+                            lane_l2[corner + 4U],
+                        };
+                    }
+                    if (coverage_mask != 0U) {
+                        shade_covered_quad(quad_x, weights_a, coverage_mask);
+                    }
+                    if (coverage_mask_b != 0U) {
+                        shade_covered_quad(quad_x + 2, weights_b, coverage_mask_b);
+                    }
+                    for (const auto edge_index : std::views::iota(std::size_t{0}, std::size_t{3})) {
+                        quad_accumulator[edge_index] += 4 * triangle.step_x[edge_index];
+                    }
+
+                    quad_x += 4;
+                    continue;
+                }
+                if (coverage_mask == 0) {
+                    for (const auto edge_index : std::views::iota(std::size_t{0}, std::size_t{3})) {
+                        quad_accumulator[edge_index] += 2 * triangle.step_x[edge_index];
+                    }
+
+                    quad_x += 2;
+                    continue;
+                }
+
+                std::array<std::array<float, 3>, 4> corner_weights{};
+                for (const auto corner : std::views::iota(std::size_t{0}, std::size_t{4})) {
+                    const auto l0 = static_cast<float>(corner_edges[corner][1]) * triangle.inv_area;
+                    const auto l1 = static_cast<float>(corner_edges[corner][2]) * triangle.inv_area;
+                    const auto l0_plus_l1 = l0 + l1;
+                    corner_weights[corner] = std::array<float, 3>{
+                        l0,
+                        l1,
+                        1.0F - l0_plus_l1,
+                    };
+                }
+
+                shade_covered_quad(quad_x, corner_weights, coverage_mask);
                 for (const auto edge_index : std::views::iota(std::size_t{0}, std::size_t{3})) {
                     quad_accumulator[edge_index] += 2 * triangle.step_x[edge_index];
                 }
+                quad_x += 2;
             }
             for (const auto edge_index : std::views::iota(std::size_t{0}, std::size_t{3})) {
                 row_accumulator[edge_index] += 2 * triangle.step_y[edge_index];

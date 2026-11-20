@@ -209,6 +209,69 @@ namespace {
     }
 
     // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE("wide quad pairs preserve coverage on partial viewports", "[tile][rasterizer]") {
+        // Odd viewport width forces partial edge tiles and scalar tail quads
+        // alongside wide pairs; tiled rendering must still match serial once
+        // per pixel with identical barycentrics.
+        constexpr std::size_t width = 33U;
+        constexpr std::size_t height = 19U;
+        const auto triangle = raster::make_screen_triangle(
+            raster::ScreenPoint{.x = -4.0F, .y = -3.0F},
+            raster::ScreenPoint{.x = -4.0F, .y = 22.0F},
+            raster::ScreenPoint{.x = 37.0F, .y = 2.0F}
+        );
+        REQUIRE(triangle.has_value());
+
+        std::vector<std::uint32_t> serial(width * height, 0U);
+        std::vector<std::uint32_t> tiled(width * height, 0U);
+        const auto record = [&](std::vector<std::uint32_t>& counts,
+                                std::size_t x,
+                                std::size_t y,
+                                const raster::QuadBarycentrics& quad) noexcept {
+            for (const auto lane : std::views::iota(std::size_t{0}, std::size_t{4})) {
+                if ((quad.visible_mask & (1U << lane)) != 0U) {
+                    const auto px = x + (lane & 1U);
+                    const auto py = y + (lane >> 1U);
+                    ++counts[py * width + px];
+                }
+            }
+        };
+        raster::rasterize_triangle_quads(
+            *triangle,
+            width,
+            height,
+            [&](std::size_t x, std::size_t y, const raster::QuadBarycentrics& quad) noexcept {
+            record(serial, x, y, quad);
+        }
+        );
+        for (std::size_t tile_y = 0U; tile_y * raster::raster_tile_size < height; ++tile_y) {
+            for (std::size_t tile_x = 0U; tile_x * raster::raster_tile_size < width; ++tile_x) {
+                const raster::RasterRegion region{
+                    .min_x = tile_x * raster::raster_tile_size,
+                    .min_y = tile_y * raster::raster_tile_size,
+                    .max_x = std::min((tile_x + 1U) * raster::raster_tile_size, width),
+                    .max_y = std::min((tile_y + 1U) * raster::raster_tile_size, height),
+                };
+                raster::rasterize_triangle_quads(
+                    *triangle,
+                    width,
+                    height,
+                    std::nullopt,
+                    [&](std::size_t x,
+                        std::size_t y,
+                        const raster::QuadBarycentrics& quad) noexcept {
+                    record(tiled, x, y, quad);
+                },
+                    region
+                );
+            }
+        }
+
+        REQUIRE(tiled == serial);
+        REQUIRE(std::ranges::all_of(tiled, [](std::uint32_t count) { return count <= 1U; }));
+    }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
     TEST_CASE("trivially covered region is detected conservatively", "[tile][rasterizer]") {
         const auto big = raster::make_screen_triangle(
             raster::ScreenPoint{.x = -10.0F, .y = -10.0F},
