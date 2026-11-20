@@ -84,6 +84,11 @@ namespace raster {
         [[nodiscard]]
         std::expected<void, PresenterError> present(const Framebuffer& framebuffer) const noexcept;
 
+        // Selects vertical-sync presentation (true) or immediate uncapped
+        // presentation (false).
+        [[nodiscard]]
+        std::expected<void, PresenterError> set_vsync(bool enabled) noexcept;
+
         void set_minimized(bool minimized) noexcept {
             minimized_ = minimized;
         }

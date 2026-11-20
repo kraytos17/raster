@@ -108,6 +108,16 @@ namespace raster {
         return {};
     }
 
+    std::expected<void, PresenterError> WindowPresenter::set_vsync(bool enabled) noexcept {
+        if (!renderer_) {
+            return std::unexpected{PresenterError::Presentation};
+        }
+        if (!SDL_SetRenderVSync(renderer_.get(), enabled ? 1 : SDL_RENDERER_VSYNC_DISABLED)) {
+            return std::unexpected{PresenterError::Presentation};
+        }
+        return {};
+    }
+
     std::expected<void, PresenterError> WindowPresenter::recreate_texture(
         std::size_t width, std::size_t height
     ) noexcept {

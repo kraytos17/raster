@@ -226,6 +226,16 @@ namespace raster::platform {
             if (!load_assets(*state)) {
                 return SDL_APP_FAILURE;
             }
+            if (SDL_GetEnvironmentVariable(SDL_GetEnvironment(), "RASTER_NO_VSYNC") != nullptr) {
+                // Immediate presentation for true frame-rate measurement.
+                // Non-fatal: tearing or dummy-driver refusal is acceptable.
+                if (auto result = state->presenter.set_vsync(false); !result) {
+                    std::println(
+                        stderr,
+                        "raster: uncapped presentation unavailable, keeping vsync"
+                    );
+                }
+            }
             if (state->free_look_test) {
                 state->free_look_framebuffer = std::make_unique<raster::Framebuffer>(
                     std::max(
