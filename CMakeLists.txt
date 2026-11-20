@@ -67,6 +67,7 @@ target_sources(raster_engine INTERFACE
         include/raster/memory/texture_layout.hpp
         include/raster/pipeline/clipper.hpp
         include/raster/pipeline/rasterizer.hpp
+        include/raster/pipeline/simd_quad.hpp
         include/raster/pipeline/tile_binner.hpp
         include/raster/pipeline/tile_executor.hpp
         include/raster/pipeline/shader.hpp
@@ -133,6 +134,7 @@ if(RASTER_BUILD_TESTS)
         tests/test_asset_loaders.cpp
         tests/test_rasterizer.cpp
         tests/test_scene.cpp
+        tests/test_simd.cpp
         tests/test_texture.cpp
         tests/test_shader.cpp
         src/platform/allocation_probe.cpp
