@@ -134,6 +134,108 @@ namespace {
             }
         }
     }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE("wide bilinear blend matches scalar exactly", "[simd][bilinear]") {
+        DeterministicRng rng{};
+        for (std::size_t trial = 0; trial < 256U; ++trial) {
+            std::array<float, 4> v00{};
+            std::array<float, 4> v10{};
+            std::array<float, 4> v01{};
+            std::array<float, 4> v11{};
+            std::array<float, 4> fx{};
+            std::array<float, 4> fy{};
+            for (std::size_t lane = 0; lane < 4U; ++lane) {
+                v00[lane] = rng.range(0.0F, 255.0F);
+                v10[lane] = rng.range(0.0F, 255.0F);
+                v01[lane] = rng.range(0.0F, 255.0F);
+                v11[lane] = rng.range(0.0F, 255.0F);
+                // Pin edge weights 0 and 1 alongside interiors.
+                fx[lane] = (trial + lane) % 7U == 0U ? 0.0F
+                    : (trial + lane) % 7U == 1U      ? 1.0F
+                                                     : rng.unit();
+                fy[lane] = (trial + lane) % 5U == 0U ? 0.0F
+                    : (trial + lane) % 5U == 1U      ? 1.0F
+                                                     : rng.unit();
+            }
+            std::array<float, 4> blended{};
+            raster::simd::bilinear_blend4(
+                v00.data(),
+                v10.data(),
+                v01.data(),
+                v11.data(),
+                fx.data(),
+                fy.data(),
+                blended.data()
+            );
+            for (std::size_t lane = 0; lane < 4U; ++lane) {
+                const auto wx0 = 1.0F - fx[lane];
+                const auto wy0 = 1.0F - fy[lane];
+                const auto expected = (v00[lane] * wx0 + v10[lane] * fx[lane])
+                    * wy0
+                    + (v01[lane] * wx0 + v11[lane] * fx[lane])
+                    * fy[lane];
+                REQUIRE(blended[lane] == expected);
+            }
+        }
+    }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE("wide trilinear mix matches scalar exactly", "[simd][mix]") {
+        DeterministicRng rng{};
+        for (std::size_t trial = 0; trial < 256U; ++trial) {
+            std::array<float, 4> low{};
+            std::array<float, 4> high{};
+            for (std::size_t lane = 0; lane < 4U; ++lane) {
+                low[lane] = rng.range(0.0F, 255.0F);
+                high[lane] = rng.range(0.0F, 255.0F);
+            }
+            const float fraction = trial % 3U == 0U ? 0.0F : trial % 3U == 1U ? 1.0F : rng.unit();
+            std::array<float, 4> mixed{};
+            raster::simd::trilinear_mix4(low.data(), high.data(), fraction, mixed.data());
+            for (std::size_t lane = 0; lane < 4U; ++lane) {
+                REQUIRE(mixed[lane] == low[lane] + (high[lane] - low[lane]) * fraction);
+            }
+        }
+    }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE("wide channel packing matches pack_channels exactly", "[simd][packch]") {
+        DeterministicRng rng{};
+        for (std::size_t trial = 0; trial < 512U; ++trial) {
+            std::array<float, 4> c0{};
+            std::array<float, 4> c1{};
+            std::array<float, 4> c2{};
+            for (std::size_t lane = 0; lane < 4U; ++lane) {
+                // Byte-range blends incl. exact .5 boundaries and near ties.
+                const auto pick = [&rng, trial, lane]() {
+                    switch ((trial + lane) % 6U) {
+                        case 0:
+                            return 127.5F;
+                        case 1:
+                            return 0.0F;
+                        case 2:
+                            return 255.0F;
+                        case 3:
+                            return 127.49999F;
+                        case 4:
+                            return 0.49999F;
+                        default:
+                            return rng.range(0.0F, 255.0F);
+                    }
+                };
+                c0[lane] = pick();
+                c1[lane] = pick();
+                c2[lane] = pick();
+            }
+            std::array<std::uint32_t, 4> packed{};
+            raster::simd::pack_channels4(c0.data(), c1.data(), c2.data(), packed.data());
+            for (std::size_t lane = 0; lane < 4U; ++lane) {
+                const std::array<float, 4> channels{c0[lane], c1[lane], c2[lane], 255.0F};
+                REQUIRE(packed[lane] == raster::pack_channels(channels));
+            }
+        }
+    }
 } // namespace
 
 #if defined(__clang__)

@@ -95,8 +95,9 @@ namespace raster::render {
 
         static_assert(ShaderProgram<FloorShader<LayoutTiled4x4>>);
 
-        // Shared quad store: scalar trilinear sampling per visible lane, then
-        // one wide quantize_pack4 instead of four scalar to_argb calls..
+        // Shared quad store: one wide trilinear sample per quad for the
+        // textured path (scalar gathers, wide blend/mix/pack), scalar
+        // fragment loop for solid-debug and checker fallbacks.
         template <typename ColorView, typename Layout> void store_shaded_quad(
             ColorView color,
             FloorShader<Layout>& shader,
@@ -107,6 +108,26 @@ namespace raster::render {
             const std::array<Vec2f, 4>& quad_uv,
             float lod
         ) noexcept {
+            if (!shader.uniforms.solid_color_debug && shader.uniforms.texture != nullptr) {
+                std::array<float, 4> u{};
+                std::array<float, 4> v{};
+                for (const auto lane : std::views::iota(std::size_t{0}, std::size_t{4})) {
+                    u[lane] = quad_uv[lane].x;
+                    v[lane] = quad_uv[lane].y;
+                }
+
+                std::array<std::uint32_t, 4> packed{};
+                shader.uniforms.texture
+                    ->sample_trilinear_quad4(u.data(), v.data(), lod, packed.data());
+                for (const auto lane : std::views::iota(std::size_t{0}, std::size_t{4})) {
+                    if ((quad.visible_mask & (1U << lane)) == 0U) {
+                        continue;
+                    }
+                    color[quad_y + (lane >> 1U), quad_x + (lane & 1U)] = packed[lane];
+                }
+                return;
+            }
+
             std::array<float, 4> red{};
             std::array<float, 4> green{};
             std::array<float, 4> blue{};
@@ -230,6 +251,7 @@ namespace raster::render {
                     height
                 ),
             };
+
             const auto triangle =
                 make_screen_triangle(screen[0], screen[1], screen[2], inverse_w, reverse_z);
             if (!triangle) {
@@ -257,7 +279,6 @@ namespace raster::render {
                     shader.uniforms.texture->width(),
                     shader.uniforms.texture->height()
                 );
-
                 store_shaded_quad(color, shader, varying_a, quad_x, quad_y, quad, quad_uv, lod);
             }
             );

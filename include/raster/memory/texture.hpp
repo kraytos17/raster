@@ -10,6 +10,7 @@
 
 #include "raster/io/tga_loader.hpp"
 #include "raster/math/vec.hpp"
+#include "raster/pipeline/simd_quad.hpp"
 
 namespace raster {
     struct TextureLevel {
@@ -116,15 +117,116 @@ namespace raster {
             return pack_channels(mixed);
         }
 
+        // Four-lane trilinear for one 2x2 quad: scalar gathers per lane (same
+        // wrap, floor, and wrap-index operations as the single-pixel path, so
+        // the same texels are fetched), then wide bilinear blend, wide level
+        // mix, and one wide pack.
+        void sample_trilinear_quad4(
+            const float* u, const float* v, float lod, std::uint32_t* out
+        ) const noexcept {
+            const auto clamped_lod = std::clamp(lod, 0.0F, static_cast<float>(levels_.size() - 1U));
+
+            const auto low_level = static_cast<std::size_t>(std::floor(clamped_lod));
+            const auto high_level = std::min(low_level + 1U, levels_.size() - 1U);
+            const auto fraction = clamped_lod - static_cast<float>(low_level);
+            const auto& low_mip = levels_[low_level];
+            const auto& high_mip = levels_[high_level];
+
+            float low_v00[3][4]{};
+            float low_v10[3][4]{};
+            float low_v01[3][4]{};
+            float low_v11[3][4]{};
+            float low_fx[4]{};
+            float low_fy[4]{};
+            float high_v00[3][4]{};
+            float high_v10[3][4]{};
+            float high_v01[3][4]{};
+            float high_v11[3][4]{};
+            float high_fx[4]{};
+            float high_fy[4]{};
+            for (std::size_t lane = 0; lane < 4U; ++lane) {
+                std::uint32_t low_corners[4]{};
+                std::uint32_t high_corners[4]{};
+                gather_bilinear_corners(
+                    low_mip,
+                    u[lane],
+                    v[lane],
+                    low_corners,
+                    low_fx[lane],
+                    low_fy[lane]
+                );
+                gather_bilinear_corners(
+                    high_mip,
+                    u[lane],
+                    v[lane],
+                    high_corners,
+                    high_fx[lane],
+                    high_fy[lane]
+                );
+
+                for (std::size_t channel = 0; channel < 3U; ++channel) {
+                    const auto shift = static_cast<std::uint32_t>(channel * 8U);
+                    low_v00[channel][lane] = static_cast<float>((low_corners[0] >> shift) & 0xFFU);
+                    low_v10[channel][lane] = static_cast<float>((low_corners[1] >> shift) & 0xFFU);
+                    low_v01[channel][lane] = static_cast<float>((low_corners[2] >> shift) & 0xFFU);
+                    low_v11[channel][lane] = static_cast<float>((low_corners[3] >> shift) & 0xFFU);
+                    high_v00[channel][lane] =
+                        static_cast<float>((high_corners[0] >> shift) & 0xFFU);
+                    high_v10[channel][lane] =
+                        static_cast<float>((high_corners[1] >> shift) & 0xFFU);
+                    high_v01[channel][lane] =
+                        static_cast<float>((high_corners[2] >> shift) & 0xFFU);
+                    high_v11[channel][lane] =
+                        static_cast<float>((high_corners[3] >> shift) & 0xFFU);
+                }
+            }
+
+            float low_blended[3][4]{};
+            float high_blended[3][4]{};
+            float mixed[3][4]{};
+            for (std::size_t channel = 0; channel < 3U; ++channel) {
+                simd::bilinear_blend4(
+                    low_v00[channel],
+                    low_v10[channel],
+                    low_v01[channel],
+                    low_v11[channel],
+                    low_fx,
+                    low_fy,
+                    low_blended[channel]
+                );
+                simd::bilinear_blend4(
+                    high_v00[channel],
+                    high_v10[channel],
+                    high_v01[channel],
+                    high_v11[channel],
+                    high_fx,
+                    high_fy,
+                    high_blended[channel]
+                );
+                simd::trilinear_mix4(
+                    low_blended[channel],
+                    high_blended[channel],
+                    fraction,
+                    mixed[channel]
+                );
+            }
+            // mixed[0/1/2] are B/G/R (channel c packs at bits c*8).
+            simd::pack_channels4(mixed[0], mixed[1], mixed[2], out);
+        }
+
     private:
 
-        // Bilinear interpolation in float: the four corner weights are
-        // non-negative and sum to 1, so each channel stays in [0, 255].
-        [[nodiscard]]
-        std::array<float, 4> sample_bilinear_channels(
-            float u, float v, std::size_t mip_level
+        // Scalar corner gather shared by the single-pixel and quad paths:
+        // wrap, floor, wrap-index, and texel loads in the same order, so both
+        // paths fetch the same four corners and fractions.
+        void gather_bilinear_corners(
+            const TextureLevel& mip,
+            float u,
+            float v,
+            std::uint32_t* corners,
+            float& fraction_x,
+            float& fraction_y
         ) const noexcept {
-            const auto& mip = levels_[std::min(mip_level, levels_.size() - 1U)];
             const auto wrap = [](float coordinate) noexcept {
                 return coordinate - std::floor(coordinate);
             };
@@ -133,8 +235,9 @@ namespace raster {
             const auto texel_y = wrap(v) * static_cast<float>(mip.height) - 0.5F;
             const auto base_x = static_cast<std::int64_t>(std::floor(texel_x));
             const auto base_y = static_cast<std::int64_t>(std::floor(texel_y));
-            const auto fraction_x = texel_x - static_cast<float>(base_x);
-            const auto fraction_y = texel_y - static_cast<float>(base_y);
+
+            fraction_x = texel_x - static_cast<float>(base_x);
+            fraction_y = texel_y - static_cast<float>(base_y);
             const typename View::mapping_type mapping{Extents{mip.height, mip.width}};
             const auto wrap_index = [](std::int64_t value, std::size_t extent) noexcept {
                 const auto signed_extent = static_cast<std::int64_t>(extent);
@@ -147,18 +250,36 @@ namespace raster {
                 return static_cast<std::size_t>(value);
             };
 
-            const auto c00 =
+            corners[0] =
                 mip.texels[mapping(wrap_index(base_y, mip.height), wrap_index(base_x, mip.width))];
-            const auto c10 =
+            corners[1] =
                 mip.texels
                     [mapping(wrap_index(base_y, mip.height), wrap_index(base_x + 1, mip.width))];
-            const auto c01 =
+            corners[2] =
                 mip.texels
                     [mapping(wrap_index(base_y + 1, mip.height), wrap_index(base_x, mip.width))];
-            const auto c11 = mip.texels[mapping(
+            corners[3] = mip.texels[mapping(
                 wrap_index(base_y + 1, mip.height),
                 wrap_index(base_x + 1, mip.width)
             )];
+        }
+
+        // Bilinear interpolation in float: the four corner weights are
+        // non-negative and sum to 1, so each channel stays in [0, 255].
+        [[nodiscard]]
+        std::array<float, 4> sample_bilinear_channels(
+            float u, float v, std::size_t mip_level
+        ) const noexcept {
+            const auto& mip = levels_[std::min(mip_level, levels_.size() - 1U)];
+            std::uint32_t corners[4]{};
+            float fraction_x{};
+            float fraction_y{};
+
+            gather_bilinear_corners(mip, u, v, corners, fraction_x, fraction_y);
+            const auto c00 = corners[0];
+            const auto c10 = corners[1];
+            const auto c01 = corners[2];
+            const auto c11 = corners[3];
 
             // Single-pass bilinear: one rounding per channel at pack time.
             const auto wx0 = 1.0F - fraction_x;

@@ -181,6 +181,53 @@ namespace {
             == texture.sample_nearest(0.1F, 0.1F, texture.level_count() - 1U)
         );
     }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE("quad trilinear sampler matches four scalar samples", "[texture][quad][simd]") {
+        // Opaque pixels so mixed alpha is 0xFF on both paths; RGB must match
+        // bit-for-bit across wrap branches, mip transitions, and LOD clamps.
+        raster::TgaImage image{};
+        image.width = 6;
+        image.height = 5;
+        image.pixels.resize(image.width * image.height);
+        for (std::size_t y = 0; y < image.height; ++y) {
+            for (std::size_t x = 0; x < image.width; ++x) {
+                const auto r = static_cast<std::uint32_t>((x * 41U + y * 17U) % 256U);
+                const auto g = static_cast<std::uint32_t>((x * 13U + y * 71U) % 256U);
+                const auto b = static_cast<std::uint32_t>((x * 29U + y * 53U) % 256U);
+                image.pixels[y * image.width + x] = 0xFF000000U | (r << 16U) | (g << 8U) | b;
+            }
+        }
+
+        const auto check_layout = [&image]<typename Layout>() {
+            const raster::Texture2D<Layout> texture{image};
+            std::uint32_t state = 0x12345678U;
+            const auto next = [&state]() noexcept {
+                state = state * 1'664'525U + 1'013'904'223U;
+                return state;
+            };
+            const auto unit = [&next]() noexcept {
+                return static_cast<float>(next() >> 8U) * (1.0F / 16777216.0F);
+            };
+            const std::array<float, 5> lods{0.0F, 0.37F, 1.5F, 5.0F, 100.0F};
+            for (std::size_t trial = 0; trial < 256U; ++trial) {
+                std::array<float, 4> u{};
+                std::array<float, 4> v{};
+                for (std::size_t lane = 0; lane < 4U; ++lane) {
+                    u[lane] = -1.5F + 4.0F * unit();
+                    v[lane] = -1.5F + 4.0F * unit();
+                }
+                const float lod = lods[trial % lods.size()];
+                std::array<std::uint32_t, 4> quad{};
+                texture.sample_trilinear_quad4(u.data(), v.data(), lod, quad.data());
+                for (std::size_t lane = 0; lane < 4U; ++lane) {
+                    REQUIRE(quad[lane] == texture.sample_trilinear(u[lane], v[lane], lod));
+                }
+            }
+        };
+        check_layout.template operator()<std::layout_right>();
+        check_layout.template operator()<raster::LayoutTiled4x4>();
+    }
 } // namespace
 
 #if defined(__clang__)

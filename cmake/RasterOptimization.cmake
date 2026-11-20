@@ -28,7 +28,7 @@ function(raster_apply_optimization target)
         $<$<AND:$<CONFIG:Release>,$<CXX_COMPILER_ID:GNU,Clang>>:-O3>
         $<$<BOOL:${RASTER_USE_PIPE}>:-pipe>
         $<$<BOOL:${RASTER_KEEP_FRAME_POINTER}>:-fno-omit-frame-pointer>
-        $<$<BOOL:${RASTER_ENABLE_NATIVE}>:-march=native;-fno-math-errno;-fno-trapping-math;-DNDEBUG>
+        $<$<BOOL:${RASTER_ENABLE_NATIVE}>:-march=native;-fno-math-errno;-fno-trapping-math;-ffp-contract=off;-DNDEBUG>
     )
     if(RASTER_ENABLE_LTO)
         set_property(TARGET ${target} PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
