@@ -74,8 +74,7 @@ namespace raster::simd {
     } // namespace detail
 
     // Eight-lane sRGB packing matching to_argb exactly: clamp to [0, 1],
-    // scale by 255, round half up, pack 0xFFRRGGBB. Same operation order as
-    // the scalar path, so results are bit-identical.
+    // scale by 255, round half up, pack 0xFFRRGGBB.
     __attribute__((target("avx2"))) inline void quantize_pack8(
         const float* red, const float* green, const float* blue, std::uint32_t* out
     ) noexcept {
@@ -103,9 +102,36 @@ namespace raster::simd {
         static_assert(sizeof(packed) == 8U * sizeof(std::uint32_t));
         std::memcpy(out, &packed, sizeof(packed));
     }
+
+    // Four-lane variant for a single 2x2 quad.
+    inline void quantize_pack4(
+        const float* red, const float* green, const float* blue, std::uint32_t* out
+    ) noexcept {
+        const __m128 zero = _mm_setzero_ps();
+        const __m128 one = _mm_set1_ps(1.0F);
+        const __m128 scale = _mm_set1_ps(255.0F);
+        const __m128 half = _mm_set1_ps(0.5F);
+        const auto quantize = [&](__m128 value) noexcept {
+            const __m128 clamped = _mm_min_ps(_mm_max_ps(value, zero), one);
+            return _mm_cvttps_epi32(_mm_add_ps(_mm_mul_ps(clamped, scale), half));
+        };
+
+        __m128i packed = _mm_or_si128(
+            _mm_or_si128(
+                _mm_slli_epi32(quantize(_mm_loadu_ps(red)), 16),
+                _mm_slli_epi32(quantize(_mm_loadu_ps(green)), 8)
+            ),
+            _mm_or_si128(
+                quantize(_mm_loadu_ps(blue)),
+                _mm_set1_epi32(static_cast<int>(0xFF000000U))
+            )
+        );
+
+        static_assert(sizeof(packed) == 4U * sizeof(std::uint32_t));
+        std::memcpy(out, &packed, sizeof(packed));
+    }
 #else
-    // Non-x86_64 fallback with identical semantics. No vectorization
-    // is expected here; this path is only a correctness baseline.
+    // Non-x86_64 fallback with identical semantics.
     inline void barycentric_weights8(
         const float* edge1, const float* edge2, float inv_area, float* l0, float* l1, float* l2
     ) noexcept {
@@ -122,6 +148,24 @@ namespace raster::simd {
         const float* red, const float* green, const float* blue, std::uint32_t* out
     ) noexcept {
         for (std::size_t lane = 0; lane < 8U; ++lane) {
+            const auto clamp = [](float channel) noexcept {
+                return std::clamp(channel, 0.0F, 1.0F);
+            };
+            const auto pack = [](float channel) noexcept {
+                // NOLINTNEXTLINE(bugprone-incorrect-roundings): non-negative bounded domain is exact.
+                return static_cast<std::uint32_t>(channel + 0.5F);
+            };
+            out[lane] = 0xFF000000U
+                | (pack(clamp(red[lane]) * 255.0F) << 16U)
+                | (pack(clamp(green[lane]) * 255.0F) << 8U)
+                | pack(clamp(blue[lane]) * 255.0F);
+        }
+    }
+
+    inline void quantize_pack4(
+        const float* red, const float* green, const float* blue, std::uint32_t* out
+    ) noexcept {
+        for (std::size_t lane = 0; lane < 4U; ++lane) {
             const auto clamp = [](float channel) noexcept {
                 return std::clamp(channel, 0.0F, 1.0F);
             };

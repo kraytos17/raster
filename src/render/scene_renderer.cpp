@@ -18,6 +18,7 @@
 #include "raster/pipeline/clipper.hpp"
 #include "raster/pipeline/rasterizer.hpp"
 #include "raster/pipeline/shader.hpp"
+#include "raster/pipeline/simd_quad.hpp"
 #include "raster/pipeline/tile_binner.hpp"
 #include "raster/pipeline/tile_executor.hpp"
 
@@ -93,6 +94,49 @@ namespace raster::render {
         };
 
         static_assert(ShaderProgram<FloorShader<LayoutTiled4x4>>);
+
+        // Shared quad store: scalar trilinear sampling per visible lane, then
+        // one wide quantize_pack4 instead of four scalar to_argb calls..
+        template <typename ColorView, typename Layout> void store_shaded_quad(
+            ColorView color,
+            FloorShader<Layout>& shader,
+            const typename FloorShader<Layout>::Varyings& varying_a,
+            std::size_t quad_x,
+            std::size_t quad_y,
+            const QuadBarycentrics& quad,
+            const std::array<Vec2f, 4>& quad_uv,
+            float lod
+        ) noexcept {
+            std::array<float, 4> red{};
+            std::array<float, 4> green{};
+            std::array<float, 4> blue{};
+            for (const auto lane : std::views::iota(std::size_t{0}, std::size_t{4})) {
+                if ((quad.visible_mask & (1U << lane)) == 0U) {
+                    continue;
+                }
+
+                const auto shaded = shader.fragment(
+                    typename FloorShader<Layout>::Varyings{
+                        .clip_pos = varying_a.clip_pos,
+                        .uv = quad_uv[lane],
+                        .mip_lod = lod,
+                    }
+                );
+
+                red[lane] = shaded.x;
+                green[lane] = shaded.y;
+                blue[lane] = shaded.z;
+            }
+
+            std::array<std::uint32_t, 4> packed{};
+            simd::quantize_pack4(red.data(), green.data(), blue.data(), packed.data());
+            for (const auto lane : std::views::iota(std::size_t{0}, std::size_t{4})) {
+                if ((quad.visible_mask & (1U << lane)) == 0U) {
+                    continue;
+                }
+                color[quad_y + (lane >> 1U), quad_x + (lane & 1U)] = packed[lane];
+            }
+        }
 
         void draw_overlay_triangle(
             Framebuffer& framebuffer,
@@ -214,22 +258,7 @@ namespace raster::render {
                     shader.uniforms.texture->height()
                 );
 
-                for (const auto lane : std::views::iota(std::size_t{0}, std::size_t{4})) {
-                    if ((quad.visible_mask & (1U << lane)) == 0U) {
-                        continue;
-                    }
-
-                    const auto x = quad_x + (lane & 1U);
-                    const auto y = quad_y + (lane >> 1U);
-                    const auto shaded = shader.fragment(
-                        typename FloorShader<Layout>::Varyings{
-                            .clip_pos = varying_a.clip_pos,
-                            .uv = quad_uv[lane],
-                            .mip_lod = lod,
-                        }
-                    );
-                    color[y, x] = to_argb(Rgb{.r = shaded.x, .g = shaded.y, .b = shaded.z});
-                }
+                store_shaded_quad(color, shader, varying_a, quad_x, quad_y, quad, quad_uv, lod);
             }
             );
         }
@@ -379,22 +408,7 @@ namespace raster::render {
                     shader.uniforms.texture->width(),
                     shader.uniforms.texture->height()
                 );
-                for (const auto lane : std::views::iota(std::size_t{0}, std::size_t{4})) {
-                    if ((quad.visible_mask & (1U << lane)) == 0U) {
-                        continue;
-                    }
-
-                    const auto x = quad_x + (lane & 1U);
-                    const auto y = quad_y + (lane >> 1U);
-                    const auto shaded = shader.fragment(
-                        typename FloorShader<Layout>::Varyings{
-                            .clip_pos = varying_a.clip_pos,
-                            .uv = quad_uv[lane],
-                            .mip_lod = lod,
-                        }
-                    );
-                    color[y, x] = to_argb(Rgb{.r = shaded.x, .g = shaded.y, .b = shaded.z});
-                }
+                store_shaded_quad(color, shader, varying_a, quad_x, quad_y, quad, quad_uv, lod);
             },
                 region
             );

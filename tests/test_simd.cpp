@@ -106,6 +106,34 @@ namespace {
     // NOTE: quad derivatives and mip LOD stay scalar: LOD is computed once
     // per 2x2 quad, not per pixel, so there is no wide fragment work to
     // vectorize there. The wide path covers per-pixel lanes only.
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE("wide 4-lane packing matches scalar to_argb exactly", "[simd][pack4]") {
+        DeterministicRng rng{};
+        for (std::size_t trial = 0; trial < 256U; ++trial) {
+            std::array<float, 4> red{};
+            std::array<float, 4> green{};
+            std::array<float, 4> blue{};
+            for (std::size_t lane = 0; lane < 4U; ++lane) {
+                // Include out-of-range values to pin clamping behavior.
+                red[lane] = rng.range(-0.5F, 1.5F);
+                green[lane] = rng.range(-0.5F, 1.5F);
+                blue[lane] = rng.range(-0.5F, 1.5F);
+            }
+            std::array<std::uint32_t, 4> packed{};
+            raster::simd::quantize_pack4(red.data(), green.data(), blue.data(), packed.data());
+            for (std::size_t lane = 0; lane < 4U; ++lane) {
+                const auto clamp = [](float channel) noexcept {
+                    return std::clamp(channel, 0.0F, 1.0F);
+                };
+                const auto expected = 0xFF000000U
+                    | (raster::quantize_channel(clamp(red[lane]) * 255.0F) << 16U)
+                    | (raster::quantize_channel(clamp(green[lane]) * 255.0F) << 8U)
+                    | raster::quantize_channel(clamp(blue[lane]) * 255.0F);
+                REQUIRE(packed[lane] == expected);
+            }
+        }
+    }
 } // namespace
 
 #if defined(__clang__)
