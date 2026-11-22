@@ -122,7 +122,10 @@ namespace raster {
         // the same texels are fetched), then wide bilinear blend, wide level
         // mix, and one wide pack.
         void sample_trilinear_quad4(
-            const float* u, const float* v, float lod, std::uint32_t* out
+            const std::array<float, 4>& u,
+            const std::array<float, 4>& v,
+            float lod,
+            std::array<std::uint32_t, 4>& out
         ) const noexcept {
             const auto clamped_lod = std::clamp(lod, 0.0F, static_cast<float>(levels_.size() - 1U));
 
@@ -148,12 +151,11 @@ namespace raster {
             for (std::size_t lane = 0; lane < 4U; ++lane) {
                 std::array<std::uint32_t, 4> low_corners{};
                 std::array<std::uint32_t, 4> high_corners{};
-
                 gather_bilinear_corners(
                     low_mip,
                     u[lane],
                     v[lane],
-                    low_corners.data(),
+                    low_corners,
                     low_fx[lane],
                     low_fy[lane]
                 );
@@ -161,7 +163,7 @@ namespace raster {
                     high_mip,
                     u[lane],
                     v[lane],
-                    high_corners.data(),
+                    high_corners,
                     high_fx[lane],
                     high_fy[lane]
                 );
@@ -187,32 +189,32 @@ namespace raster {
             std::array<std::array<float, 4>, 3> mixed{};
             for (std::size_t channel = 0; channel < 3U; ++channel) {
                 simd::bilinear_blend4(
-                    low_v00[channel].data(),
-                    low_v10[channel].data(),
-                    low_v01[channel].data(),
-                    low_v11[channel].data(),
-                    low_fx.data(),
-                    low_fy.data(),
-                    low_blended[channel].data()
+                    low_v00[channel],
+                    low_v10[channel],
+                    low_v01[channel],
+                    low_v11[channel],
+                    low_fx,
+                    low_fy,
+                    low_blended[channel]
                 );
                 simd::bilinear_blend4(
-                    high_v00[channel].data(),
-                    high_v10[channel].data(),
-                    high_v01[channel].data(),
-                    high_v11[channel].data(),
-                    high_fx.data(),
-                    high_fy.data(),
-                    high_blended[channel].data()
+                    high_v00[channel],
+                    high_v10[channel],
+                    high_v01[channel],
+                    high_v11[channel],
+                    high_fx,
+                    high_fy,
+                    high_blended[channel]
                 );
                 simd::trilinear_mix4(
-                    low_blended[channel].data(),
-                    high_blended[channel].data(),
+                    low_blended[channel],
+                    high_blended[channel],
                     fraction,
-                    mixed[channel].data()
+                    mixed[channel]
                 );
             }
             // mixed[0/1/2] are B/G/R (channel c packs at bits c*8).
-            simd::pack_channels4(mixed[0].data(), mixed[1].data(), mixed[2].data(), out);
+            simd::pack_channels4(mixed[0], mixed[1], mixed[2], out);
         }
 
     private:
@@ -224,7 +226,7 @@ namespace raster {
             const TextureLevel& mip,
             float u,
             float v,
-            std::uint32_t* corners,
+            std::array<std::uint32_t, 4>& corners,
             float& fraction_x,
             float& fraction_y
         ) const noexcept {
@@ -276,7 +278,7 @@ namespace raster {
             float fraction_x{};
             float fraction_y{};
 
-            gather_bilinear_corners(mip, u, v, corners.data(), fraction_x, fraction_y);
+            gather_bilinear_corners(mip, u, v, corners, fraction_x, fraction_y);
             const auto c00 = corners[0];
             const auto c10 = corners[1];
             const auto c01 = corners[2];

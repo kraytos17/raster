@@ -142,6 +142,39 @@ namespace raster {
         return perspective_reverse_z_from_focal4f(focal, aspect, z_near, z_far);
     }
 
+    // Reverse-Z orthographic projection: the near plane maps to z_ndc = 1.0f
+    // and the far plane to z_ndc = 0.0f, linearly in view depth, with w_c = 1.
+    // View space follows the look_at4f convention (camera looks down -z, so a
+    // point at distance d in front has z_view = -d):
+    //   z_c = z_view / (f - n) + f / (f - n)
+    // gives z_c == 1 at the near plane and 0 at the far plane. x and y are the
+    // standard orthographic scale/bias. Invalid parameters return identity.
+    [[nodiscard]]
+    constexpr Mat4f ortho_reverse_z4f(
+        float left, float right, float bottom, float top, float z_near, float z_far
+    ) noexcept {
+        if (!(right > left) || !(top > bottom) || !(z_far > z_near) || !(z_near > 0.0F)) {
+            return identity4f();
+        }
+
+        const float width = right - left;
+        const float height = top - bottom;
+        const float depth = z_far - z_near;
+        return Mat4f{
+            .columns = {
+                Vec4f{.x = 2.0F / width, .y = 0.0F, .z = 0.0F, .w = 0.0F},
+                Vec4f{.x = 0.0F, .y = 2.0F / height, .z = 0.0F, .w = 0.0F},
+                Vec4f{.x = 0.0F, .y = 0.0F, .z = 1.0F / depth, .w = 0.0F},
+                Vec4f{
+                    .x = -(right + left) / width,
+                    .y = -(top + bottom) / height,
+                    .z = z_far / depth,
+                    .w = 1.0F,
+                },
+            },
+        };
+    }
+
     [[nodiscard]]
     constexpr Vec4f operator*(const Mat4f& matrix, const Vec4f& vector) noexcept {
         return matrix.columns[0]

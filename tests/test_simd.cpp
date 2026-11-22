@@ -3,6 +3,8 @@
 #include <catch2/catch_test_macros.hpp>
 #include <cstddef>
 #include <cstdint>
+#include <span>
+#include <vector>
 
 #include "raster/memory/texture.hpp"
 #include "raster/pipeline/simd_quad.hpp"
@@ -52,14 +54,7 @@ namespace {
             std::array<float, 8> l0{};
             std::array<float, 8> l1{};
             std::array<float, 8> l2{};
-            raster::simd::barycentric_weights8(
-                edge1.data(),
-                edge2.data(),
-                inv_area,
-                l0.data(),
-                l1.data(),
-                l2.data()
-            );
+            raster::simd::barycentric_weights8(edge1, edge2, inv_area, l0, l1, l2);
             for (std::size_t lane = 0; lane < 8U; ++lane) {
                 const auto expected_l0 = edge1[lane] * inv_area;
                 const auto expected_l1 = edge2[lane] * inv_area;
@@ -89,7 +84,7 @@ namespace {
                 blue[lane] = rng.range(-0.5F, 1.5F);
             }
             std::array<std::uint32_t, 8> packed{};
-            raster::simd::quantize_pack8(red.data(), green.data(), blue.data(), packed.data());
+            raster::simd::quantize_pack8(red, green, blue, packed);
             for (std::size_t lane = 0; lane < 8U; ++lane) {
                 const auto clamp = [](float channel) noexcept {
                     return std::clamp(channel, 0.0F, 1.0F);
@@ -121,7 +116,7 @@ namespace {
                 blue[lane] = rng.range(-0.5F, 1.5F);
             }
             std::array<std::uint32_t, 4> packed{};
-            raster::simd::quantize_pack4(red.data(), green.data(), blue.data(), packed.data());
+            raster::simd::quantize_pack4(red, green, blue, packed);
             for (std::size_t lane = 0; lane < 4U; ++lane) {
                 const auto clamp = [](float channel) noexcept {
                     return std::clamp(channel, 0.0F, 1.0F);
@@ -159,15 +154,7 @@ namespace {
                                                      : rng.unit();
             }
             std::array<float, 4> blended{};
-            raster::simd::bilinear_blend4(
-                v00.data(),
-                v10.data(),
-                v01.data(),
-                v11.data(),
-                fx.data(),
-                fy.data(),
-                blended.data()
-            );
+            raster::simd::bilinear_blend4(v00, v10, v01, v11, fx, fy, blended);
             for (std::size_t lane = 0; lane < 4U; ++lane) {
                 const auto wx0 = 1.0F - fx[lane];
                 const auto wy0 = 1.0F - fy[lane];
@@ -192,7 +179,7 @@ namespace {
             }
             const float fraction = trial % 3U == 0U ? 0.0F : trial % 3U == 1U ? 1.0F : rng.unit();
             std::array<float, 4> mixed{};
-            raster::simd::trilinear_mix4(low.data(), high.data(), fraction, mixed.data());
+            raster::simd::trilinear_mix4(low, high, fraction, mixed);
             for (std::size_t lane = 0; lane < 4U; ++lane) {
                 REQUIRE(mixed[lane] == low[lane] + (high[lane] - low[lane]) * fraction);
             }
@@ -229,7 +216,7 @@ namespace {
                 c2[lane] = pick();
             }
             std::array<std::uint32_t, 4> packed{};
-            raster::simd::pack_channels4(c0.data(), c1.data(), c2.data(), packed.data());
+            raster::simd::pack_channels4(c0, c1, c2, packed);
             for (std::size_t lane = 0; lane < 4U; ++lane) {
                 const std::array<float, 4> channels{c0[lane], c1[lane], c2[lane], 255.0F};
                 REQUIRE(packed[lane] == raster::pack_channels(channels));
@@ -246,7 +233,7 @@ namespace {
             // Offset by one element to force 4-byte-but-not-16-byte alignment.
             std::vector<std::uint32_t> wide(count + 1U, 0xDEADBEEFU);
             std::vector<std::uint32_t> reference(count + 1U, 0xDEADBEEFU);
-            raster::simd::stream_fill_u32(wide.data() + 1U, count, value);
+            raster::simd::stream_fill_u32(std::span<std::uint32_t>{wide.data() + 1U, count}, value);
             std::ranges::fill(reference.begin() + 1, reference.end(), value);
             REQUIRE(wide == reference);
         }
@@ -290,25 +277,27 @@ namespace {
             constexpr float sun_y = 0.6F;
             constexpr float sun_z = 0.8F;
             constexpr float ambient = 0.4F;
-            constexpr float sun_scale = 0.6F;
+            // Mixed per-lane scales pin the shadow path (0 = ambient only)
+            // alongside the lit path with the same helper.
+            const std::array<float, 4> sun_scale{0.6F, 0.0F, 0.6F, 0.0F};
             std::array<float, 4> out_red{};
             std::array<float, 4> out_green{};
             std::array<float, 4> out_blue{};
             raster::simd::apply_light4(
-                red.data(),
-                green.data(),
-                blue.data(),
-                nx.data(),
-                ny.data(),
-                nz.data(),
+                red,
+                green,
+                blue,
+                nx,
+                ny,
+                nz,
                 sun_x,
                 sun_y,
                 sun_z,
                 ambient,
                 sun_scale,
-                out_red.data(),
-                out_green.data(),
-                out_blue.data()
+                out_red,
+                out_green,
+                out_blue
             );
             for (std::size_t lane = 0; lane < 4U; ++lane) {
                 const auto dot_nn = nx[lane] * nx[lane] + ny[lane] * ny[lane] + nz[lane] * nz[lane];
@@ -320,7 +309,7 @@ namespace {
                 const auto hy = len == 0.0F ? 0.0F : ny[lane] / len;
                 const auto hz = len == 0.0F ? 0.0F : nz[lane] / len;
                 const auto diffuse = std::max(hx * sun_x + hy * sun_y + hz * sun_z, 0.0F);
-                const auto gain = ambient + diffuse * sun_scale;
+                const auto gain = ambient + diffuse * sun_scale[lane];
                 REQUIRE(out_red[lane] == red[lane] * gain);
                 REQUIRE(out_green[lane] == green[lane] * gain);
                 REQUIRE(out_blue[lane] == blue[lane] * gain);

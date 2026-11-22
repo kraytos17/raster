@@ -179,6 +179,34 @@ namespace {
     }
 
     // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE("ortho reverse-z maps near to 1 and far to 0", "[math][mat]") {
+        // l/r/b/t = +/-1, n=2, f=4 makes every entry an exact binary float,
+        // so all mappings below are exact under round-to-nearest.
+        constexpr auto projection = raster::ortho_reverse_z4f(-1.0F, 1.0F, -1.0F, 1.0F, 2.0F, 4.0F);
+        constexpr auto clip_mid =
+            projection * raster::Vec4f{.x = 0.5F, .y = -0.5F, .z = -3.0F, .w = 1.0F};
+        STATIC_REQUIRE(clip_mid.w == 1.0F);
+        STATIC_REQUIRE(clip_mid.x / clip_mid.w == 0.5F);
+        STATIC_REQUIRE(clip_mid.y / clip_mid.w == -0.5F);
+        STATIC_REQUIRE(clip_mid.z / clip_mid.w == 0.5F);
+        constexpr auto clip_near =
+            projection * raster::Vec4f{.x = 0.0F, .y = 0.0F, .z = -2.0F, .w = 1.0F};
+        STATIC_REQUIRE(clip_near.z / clip_near.w == 1.0F);
+        constexpr auto clip_far =
+            projection * raster::Vec4f{.x = 0.0F, .y = 0.0F, .z = -4.0F, .w = 1.0F};
+        STATIC_REQUIRE(clip_far.z == 0.0F);
+        constexpr auto clip_edge =
+            projection * raster::Vec4f{.x = -1.0F, .y = 1.0F, .z = -2.5F, .w = 1.0F};
+        STATIC_REQUIRE(clip_edge.x / clip_edge.w == -1.0F);
+        STATIC_REQUIRE(clip_edge.y / clip_edge.w == 1.0F);
+
+        const auto invalid = raster::ortho_reverse_z4f(1.0F, -1.0F, -1.0F, 1.0F, 2.0F, 4.0F);
+        REQUIRE(invalid[0, 0] == 1.0F);
+        REQUIRE(invalid[2, 3] == 0.0F);
+        REQUIRE(invalid[3, 3] == 1.0F);
+    }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
     TEST_CASE("reverse-z projection rejects invalid parameters", "[math][mat]") {
         const auto invalid = raster::perspective_reverse_z4f(
             std::numbers::pi_v<float> / 2.0F,

@@ -580,12 +580,12 @@ namespace raster {
                     std::array<float, 8> lane_l1{};
                     std::array<float, 8> lane_l2{};
                     simd::barycentric_weights8(
-                        edge_values_1.data(),
-                        edge_values_2.data(),
+                        edge_values_1,
+                        edge_values_2,
                         triangle.inv_area,
-                        lane_l0.data(),
-                        lane_l1.data(),
-                        lane_l2.data()
+                        lane_l0,
+                        lane_l1,
+                        lane_l2
                     );
 
                     std::array<std::array<float, 3>, 4> weights_a{};

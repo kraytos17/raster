@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <mdspan>
 #include <numbers>
 #include <print>
 #include <ranges>
@@ -44,14 +45,41 @@ namespace raster::render {
             return 0xFF000000U | (red << 16U) | (green << 8U) | blue;
         }
 
+        // Fixed-size reverse-Z shadow map: one float per texel, cleared to far
+        // (0.0) each frame, written by the depth-only light pass. Allocated
+        // once — never in the per-frame render path.
+        struct ShadowMap {
+            static constexpr std::size_t k_size = 1024;
+            std::vector<float> depth = std::vector<float>(k_size * k_size, 0.0F);
+
+            void clear() noexcept {
+                std::ranges::fill(depth, 0.0F);
+            }
+        };
+
+        // Fixed sun rig shared by the light pass and the receiver lookup.
+        // Light looks from -sun * distance toward the origin; the ortho box
+        // covers the shipped scenes with margin. Clamp behavior outside:
+        // fragments outside [0, 1] in any light NDC axis count as lit.
+        inline constexpr float k_shadow_eye_distance = 30.0F;
+        inline constexpr float k_shadow_half_extent = 16.0F;
+        inline constexpr float k_shadow_near = 15.0F;
+        inline constexpr float k_shadow_far = 45.0F;
+        inline constexpr float k_shadow_bias = 0.0005F;
+        inline constexpr float k_shadow_slope = 0.002F;
+
         template <typename Layout> struct FloorShader final : ShaderBase {
             struct Uniforms {
                 Mat4f model_view_projection{};
+                Mat4f light_view_projection{};
                 const Texture2D<Layout>* texture{};
+                const ShadowMap* shadow_map{};
                 bool solid_color_debug{};
                 Vec3f sun_direction{};
                 float ambient{};
                 float sun_scale{};
+                float shadow_bias{};
+                float shadow_slope{};
             };
 
             Uniforms uniforms{};
@@ -60,35 +88,97 @@ namespace raster::render {
                 Vec4f clip_pos{};
                 Vec2f uv{};
                 Vec3f normal{};
+                Vec4f light_clip{};
                 float mip_lod{};
 
                 [[nodiscard]]
                 constexpr auto attributes(this auto&& self) noexcept {
-                    return std::tie(self.uv, self.normal);
+                    return std::tie(self.uv, self.normal, self.light_clip);
                 }
             };
 
             [[nodiscard]]
             constexpr Varyings vertex(Vec3f position, Vec2f uv, Vec3f normal) const noexcept {
+                const Vec4f world{
+                    .x = position.x,
+                    .y = position.y,
+                    .z = position.z,
+                    .w = 1.0F,
+                };
                 return Varyings{
-                    .clip_pos = uniforms.model_view_projection
-                        * Vec4f{
-                            .x = position.x,
-                            .y = position.y,
-                            .z = position.z,
-                            .w = 1.0F,
-                        },
+                    .clip_pos = uniforms.model_view_projection * world,
                     .uv = uv,
                     .normal = normal,
+                    .light_clip = uniforms.light_view_projection * world,
                 };
             }
 
-            // Ambient + Lambertian diffuse from the uniforms sun.
+            // Ambient + Lambertian diffuse from the uniforms sun. When the
+            // shadow map says dark, only ambient survives.
             [[nodiscard]]
-            constexpr Vec3f shade_lit(Vec3f albedo, Vec3f normal) const noexcept {
-                const auto diffuse = std::max(dot(normalize(normal), uniforms.sun_direction), 0.0F);
+            constexpr Vec3f shade_lit(Vec3f albedo, Vec3f normal, bool lit) const noexcept {
+                const auto diffuse =
+                    lit ? std::max(dot(normalize(normal), uniforms.sun_direction), 0.0F) : 0.0F;
+
                 const auto gain = uniforms.ambient + diffuse * uniforms.sun_scale;
                 return Vec3f{.x = albedo.x * gain, .y = albedo.y * gain, .z = albedo.z * gain};
+            }
+
+            // Shadow test for one fragment: project the interpolated light
+            // clip position, fetch the nearest occluder depth, compare with a
+            // slope-scaled bias. Outside the shadow frustum counts as lit.
+            [[nodiscard]]
+            bool shadow_lit(Vec4f light_clip, Vec3f normal) const noexcept {
+                if (uniforms.shadow_map == nullptr || light_clip.w <= 0.0F) {
+                    return true;
+                }
+
+                const auto inv_w = 1.0F / light_clip.w;
+                const auto ndc_x = light_clip.x * inv_w;
+                const auto ndc_y = light_clip.y * inv_w;
+                const auto ndc_z = light_clip.z * inv_w;
+                // Defensive: NaN would make the float-to-size_t casts below
+                // undefined; treat as outside the frustum instead.
+                if (!std::isfinite(ndc_x) || !std::isfinite(ndc_y) || !std::isfinite(ndc_z)) {
+                    return true;
+                }
+                if (ndc_x
+                    < -1.0F
+                    || ndc_x
+                    > 1.0F
+                    || ndc_y
+                    < -1.0F
+                    || ndc_y
+                    > 1.0F
+                    || ndc_z
+                    < 0.0F
+                    || ndc_z
+                    > 1.0F) {
+                    return true;
+                }
+
+                // Same mapping the rasterizer used to write the map.
+                const auto sample_at =
+                    viewport_to_screen(ndc_x, ndc_y, ShadowMap::k_size, ShadowMap::k_size);
+                if (sample_at.x
+                    < 0.0F
+                    || sample_at.y
+                    < 0.0F
+                    || sample_at.x
+                    >= static_cast<float>(ShadowMap::k_size)
+                    || sample_at.y
+                    >= static_cast<float>(ShadowMap::k_size)) {
+                    return true;
+                }
+
+                const auto ix = static_cast<std::size_t>(sample_at.x);
+                const auto iy = static_cast<std::size_t>(sample_at.y);
+                const auto texel = (*uniforms.shadow_map).depth[iy * ShadowMap::k_size + ix];
+                const auto slope =
+                    1.0F - std::max(dot(normalize(normal), uniforms.sun_direction), 0.0F);
+
+                const auto bias = uniforms.shadow_bias + uniforms.shadow_slope * slope;
+                return ndc_z + bias >= texel;
             }
 
             [[nodiscard]]
@@ -111,9 +201,10 @@ namespace raster::render {
                 };
 
                 // Solid and checker diagnostics stay unlit; only the textured
-                // path goes through the sun.
-                const bool lit = !uniforms.solid_color_debug && uniforms.texture != nullptr;
-                const auto shaded = lit ? shade_lit(albedo, varying.normal) : albedo;
+                // path goes through the sun and the shadow map.
+                const bool textured = !uniforms.solid_color_debug && uniforms.texture != nullptr;
+                const bool lit = textured && shadow_lit(varying.light_clip, varying.normal);
+                const auto shaded = textured ? shade_lit(albedo, varying.normal, lit) : albedo;
                 return Vec4f{.x = shaded.x, .y = shaded.y, .z = shaded.z, .w = 1.0F};
             }
         };
@@ -136,6 +227,7 @@ namespace raster::render {
             const QuadBarycentrics& quad,
             const std::array<Vec2f, 4>& quad_uv,
             const std::array<Vec3f, 4>& quad_normal,
+            const std::array<Vec4f, 4>& quad_light,
             float lod
         ) noexcept {
             static const bool profile =
@@ -159,8 +251,7 @@ namespace raster::render {
                 }
 
                 std::array<std::uint32_t, 4> packed{};
-                shader.uniforms.texture
-                    ->sample_trilinear_quad4(u.data(), v.data(), lod, packed.data());
+                shader.uniforms.texture->sample_trilinear_quad4(u, v, lod, packed);
                 // Unpack, light wide with the same operation order as the
                 // scalar shader math, repack. The sample→pack→unpack roundtrip
                 // is idempotent on texel bytes, so this matches a
@@ -171,6 +262,7 @@ namespace raster::render {
                 std::array<float, 4> nx{};
                 std::array<float, 4> ny{};
                 std::array<float, 4> nz{};
+                std::array<float, 4> lane_sun{};
                 for (const auto lane : std::views::iota(std::size_t{0}, std::size_t{4})) {
                     red[lane] = static_cast<float>((packed[lane] >> 16U) & 0xFFU) / 255.0F;
                     green[lane] = static_cast<float>((packed[lane] >> 8U) & 0xFFU) / 255.0F;
@@ -178,33 +270,34 @@ namespace raster::render {
                     nx[lane] = quad_normal[lane].x;
                     ny[lane] = quad_normal[lane].y;
                     nz[lane] = quad_normal[lane].z;
+                    // Shadowed lanes keep ambient only: a zero scale zeroes
+                    // the diffuse term exactly like the scalar branch.
+                    const bool lit = (quad.visible_mask & (1U << lane))
+                        == 0U
+                        || shader.shadow_lit(quad_light[lane], quad_normal[lane]);
+                    lane_sun[lane] = lit ? shader.uniforms.sun_scale : 0.0F;
                 }
 
                 std::array<float, 4> lit_red{};
                 std::array<float, 4> lit_green{};
                 std::array<float, 4> lit_blue{};
                 simd::apply_light4(
-                    red.data(),
-                    green.data(),
-                    blue.data(),
-                    nx.data(),
-                    ny.data(),
-                    nz.data(),
+                    red,
+                    green,
+                    blue,
+                    nx,
+                    ny,
+                    nz,
                     shader.uniforms.sun_direction.x,
                     shader.uniforms.sun_direction.y,
                     shader.uniforms.sun_direction.z,
                     shader.uniforms.ambient,
-                    shader.uniforms.sun_scale,
-                    lit_red.data(),
-                    lit_green.data(),
-                    lit_blue.data()
+                    lane_sun,
+                    lit_red,
+                    lit_green,
+                    lit_blue
                 );
-                simd::quantize_pack4(
-                    lit_red.data(),
-                    lit_green.data(),
-                    lit_blue.data(),
-                    packed.data()
-                );
+                simd::quantize_pack4(lit_red, lit_green, lit_blue, packed);
                 for (const auto lane : std::views::iota(std::size_t{0}, std::size_t{4})) {
                     if ((quad.visible_mask & (1U << lane)) == 0U) {
                         continue;
@@ -227,6 +320,7 @@ namespace raster::render {
                         .clip_pos = varying_a.clip_pos,
                         .uv = quad_uv[lane],
                         .normal = quad_normal[lane],
+                        .light_clip = quad_light[lane],
                         .mip_lod = lod,
                     }
                 );
@@ -237,7 +331,7 @@ namespace raster::render {
             }
 
             std::array<std::uint32_t, 4> packed{};
-            simd::quantize_pack4(red.data(), green.data(), blue.data(), packed.data());
+            simd::quantize_pack4(red, green, blue, packed);
             for (const auto lane : std::views::iota(std::size_t{0}, std::size_t{4})) {
                 if ((quad.visible_mask & (1U << lane)) == 0U) {
                     continue;
@@ -354,12 +448,15 @@ namespace raster::render {
                 [&](std::size_t quad_x, std::size_t quad_y, const QuadBarycentrics& quad) noexcept {
                 std::array<Vec2f, 4> quad_uv{};
                 std::array<Vec3f, 4> quad_normal{};
+                std::array<Vec4f, 4> quad_light{};
                 for (const auto lane : std::views::iota(std::size_t{0}, std::size_t{4})) {
                     const auto& barycentrics = quad.lanes[lane];
                     const auto attributes =
                         shader.interpolate(varying_a, varying_b, varying_c, barycentrics);
+
                     quad_uv[lane] = std::get<0>(attributes);
                     quad_normal[lane] = std::get<1>(attributes);
+                    quad_light[lane] = std::get<2>(attributes);
                 }
 
                 const auto derivatives = quad_derivatives(quad_uv);
@@ -377,6 +474,7 @@ namespace raster::render {
                     quad,
                     quad_uv,
                     quad_normal,
+                    quad_light,
                     lod
                 );
             }
@@ -417,7 +515,7 @@ namespace raster::render {
                 if (!clipped) {
                     return false;
                 }
-                for (const auto& triangle : std::span{clipped->triangles.data(), clipped->size}) {
+                for (const auto& triangle : std::span{clipped->triangles}.first(clipped->size)) {
                     draw_mesh_triangle(
                         framebuffer,
                         shader,
@@ -475,7 +573,7 @@ namespace raster::render {
                     return false;
                 }
                 for (const auto& clipped_triangle :
-                     std::span{clipped->triangles.data(), clipped->size}) {
+                     std::span{clipped->triangles}.first(clipped->size)) {
                     const std::array<typename FloorShader<Layout>::Varyings, 3> vertices{
                         clipped_triangle.vertices[0],
                         clipped_triangle.vertices[1],
@@ -541,11 +639,13 @@ namespace raster::render {
                 [&](std::size_t quad_x, std::size_t quad_y, const QuadBarycentrics& quad) noexcept {
                 std::array<Vec2f, 4> quad_uv{};
                 std::array<Vec3f, 4> quad_normal{};
+                std::array<Vec4f, 4> quad_light{};
                 for (const auto lane : std::views::iota(std::size_t{0}, std::size_t{4})) {
                     const auto attributes =
                         shader.interpolate(varying_a, varying_b, varying_c, quad.lanes[lane]);
                     quad_uv[lane] = std::get<0>(attributes);
                     quad_normal[lane] = std::get<1>(attributes);
+                    quad_light[lane] = std::get<2>(attributes);
                 }
 
                 const auto derivatives = quad_derivatives(quad_uv);
@@ -563,6 +663,7 @@ namespace raster::render {
                     quad,
                     quad_uv,
                     quad_normal,
+                    quad_light,
                     lod
                 );
             },
@@ -590,6 +691,7 @@ namespace raster::render {
 
                 prepared.reserve(mesh_triangle_count * 8U);
                 setups.reserve(mesh_triangle_count * 8U);
+                shadow_prepared.reserve(mesh_triangle_count * 8U);
                 bins.reserve(tile_count, tile_count * 8U);
                 thread_prepared.resize(worker_count);
                 const auto chunk_reserve =
@@ -605,7 +707,77 @@ namespace raster::render {
             std::vector<PreparedTriangle<Layout>> prepared{};
             std::vector<ScreenTriangle> setups{};
             std::vector<std::vector<PreparedTriangle<Layout>>> thread_prepared{};
+            ShadowMap shadow_map{};
+            std::vector<PreparedTriangle<Layout>> shadow_prepared{};
         };
+
+        // Depth-only light pass: prepares the mesh in light space and
+        // rasterizes every triangle into the shadow depth buffer, reusing the
+        // rasterizer's depth test/write. The no-op fragment proves the point:
+        // depth happens before shading. Runs serially; parallelize only if
+        // the perf gate says the shadow pass dominates (it reuses the same
+        // prepare_mesh as the main pass, so no new math to verify).
+        template <typename Layout> [[nodiscard]]
+        bool render_shadow_map(
+            ShadowMap& shadow,
+            FloorShader<Layout>& light_shader,
+            const SoAMesh& mesh,
+            std::vector<PreparedTriangle<Layout>>& scratch
+        ) noexcept {
+            static const bool profile =
+                SDL_GetEnvironmentVariable(SDL_GetEnvironment(), "RASTER_PROFILE") != nullptr;
+            const auto timestamp_begin = steady_clock::now();
+            if (!prepare_mesh(
+                    light_shader,
+                    mesh,
+                    ShadowMap::k_size,
+                    ShadowMap::k_size,
+                    false,
+                    0U,
+                    mesh.triangle_count(),
+                    scratch
+                )) {
+                return false;
+            }
+
+            shadow.clear();
+            auto depth_view = std::mdspan<float, Extents2D>{
+                shadow.depth.data(),
+                ShadowMap::k_size,
+                ShadowMap::k_size,
+            };
+
+            const auto record_nothing =
+                [](std::size_t, std::size_t, const QuadBarycentrics&) noexcept {
+            };
+            for (const auto& triangle : scratch) {
+                rasterize_triangle_quads(
+                    triangle.setup,
+                    ShadowMap::k_size,
+                    ShadowMap::k_size,
+                    depth_view,
+                    record_nothing
+                );
+            }
+            if (profile) {
+                using Milliseconds = std::chrono::duration<double, std::milli>;
+                try {
+                    std::println(
+                        stderr,
+                        "raster: profile shadow {:.2f} ms tris {}",
+                        Milliseconds(steady_clock::now() - timestamp_begin).count(),
+                        scratch.size()
+                    );
+                } catch (...) {
+                    try {
+                        std::println(stderr, "raster: profile output failed");
+                    } catch (...) { //NOLINT
+                        // Abandon profiling output rather than terminate.
+                    }
+                }
+            }
+            return true;
+        }
 
         template <typename Layout> [[nodiscard]]
         bool draw_tiled_mesh(
@@ -752,12 +924,7 @@ namespace raster::render {
             return true;
         }
 
-        simd::stream_fill_u32(
-            framebuffer.color_storage.data(),
-            framebuffer.color_storage.size(),
-            0xFF101018U
-        );
-
+        simd::stream_fill_u32(framebuffer.color_storage, 0xFF101018U);
         std::ranges::fill(framebuffer.depth_storage, 0.0F);
         const auto seconds = static_cast<float>(static_cast<double>(elapsed_ns) * 1e-9);
         const auto stress_phase = std::fmod(seconds * 0.5F, 2.0F);
@@ -815,7 +982,45 @@ namespace raster::render {
         shader.uniforms.sun_direction = normalize(Vec3f{.x = 0.0F, .y = 3.0F, .z = 4.0F});
         shader.uniforms.ambient = 0.4F;
         shader.uniforms.sun_scale = 0.6F;
+        shader.uniforms.shadow_bias = k_shadow_bias;
+        shader.uniforms.shadow_slope = k_shadow_slope;
+        // Fixed sun rig: ortho frustum looking from -sun toward the origin.
+        // Same constants feed the shadow pass and the receiver lookup, so the
+        // two can never disagree about the light.
+        const auto light_view = look_at4f(
+            Vec3f{
+                .x = -shader.uniforms.sun_direction.x * k_shadow_eye_distance,
+                .y = -shader.uniforms.sun_direction.y * k_shadow_eye_distance,
+                .z = -shader.uniforms.sun_direction.z * k_shadow_eye_distance,
+            },
+            Vec3f{.x = 0.0F, .y = 0.0F, .z = 0.0F},
+            Vec3f{.x = 0.0F, .y = 1.0F, .z = 0.0F}
+        );
+        const auto light_projection = ortho_reverse_z4f(
+            -k_shadow_half_extent,
+            k_shadow_half_extent,
+            -k_shadow_half_extent,
+            k_shadow_half_extent,
+            k_shadow_near,
+            k_shadow_far
+        );
+
+        const auto light_view_projection = light_projection * light_view;
+        shader.uniforms.light_view_projection = light_view_projection;
+
+        FloorShader<Layout> light_shader{};
+        light_shader.uniforms.model_view_projection = light_view_projection;
+        light_shader.uniforms.light_view_projection = light_view_projection;
         if (tile_state != nullptr) {
+            shader.uniforms.shadow_map = &tile_state->shadow_map;
+            if (!render_shadow_map(
+                    tile_state->shadow_map,
+                    light_shader,
+                    mesh,
+                    tile_state->shadow_prepared
+                )) {
+                return false;
+            }
             if (!draw_tiled_mesh(
                     framebuffer,
                     shader,
@@ -827,6 +1032,12 @@ namespace raster::render {
                 return false;
             }
         } else {
+            thread_local ShadowMap serial_shadow{};
+            thread_local std::vector<PreparedTriangle<Layout>> serial_shadow_prepared{};
+            shader.uniforms.shadow_map = &serial_shadow;
+            if (!render_shadow_map(serial_shadow, light_shader, mesh, serial_shadow_prepared)) {
+                return false;
+            }
             if (!draw_mesh(framebuffer, shader, mesh, guard_band_test)) {
                 return false;
             }

@@ -900,12 +900,179 @@ namespace {
         // Mid-range bytes stay 3e-5 from any rounding boundary: output must
         // equal the input texels exactly. Passes before lighting exists too,
         // which validates the harness (winding, coverage); the ambient test
-        // above is the one that fails until lighting lands.
+        // above is the one that fails until lighting lands. With shadows
+        // enabled it additionally pins self-shadow correctness: the bias must
+        // cover interpolation error or this goes dark.
         check_lit_triangle(
             make_two_sided_triangle(raster::Vec3f{.x = 0.0F, .y = 0.6F, .z = 0.8F}),
             0xFF336699U,
             0xFF336699U
         );
+    }
+
+    raster::SoAMesh make_shadow_scene() {
+        // Receiver: face-on to the sun, so unoccluded it reproduces texels
+        // (M1 face-on test). Occluder: square perpendicular to the sun through
+        // C = receiver_center - sun * 5, half-size 3 — between light and
+        // receiver along every ray through the receiver (shadow depth 0.667 vs
+        // receiver 0.5, far outside any bias), off the main view axis so the
+        // receiver pixel shows the receiver, not the occluder. The occluder is
+        // partially visible to the main camera, but its normal faces away from
+        // the sun, so it shades ambient-only: pixel-identical to the expected
+        // shadow color, and the frame check below stays exact.
+        constexpr raster::Vec3f sun{.x = 0.0F, .y = 0.6F, .z = 0.8F};
+        constexpr raster::Vec3f center{.x = 0.0F, .y = -3.0F, .z = -4.0F};
+        const auto side =
+            raster::normalize(raster::cross(sun, raster::Vec3f{.x = 0.0F, .y = 1.0F, .z = 0.0F}));
+        const auto up = raster::normalize(raster::cross(sun, side));
+        constexpr float half = 3.0F;
+        const std::array<raster::Vec3f, 4> corners{
+            raster::Vec3f{
+                .x = center.x - half * side.x - half * up.x,
+                .y = center.y - half * side.y - half * up.y,
+                .z = center.z - half * side.z - half * up.z,
+            },
+            raster::Vec3f{
+                .x = center.x + half * side.x - half * up.x,
+                .y = center.y + half * side.y - half * up.y,
+                .z = center.z + half * side.z - half * up.z,
+            },
+            raster::Vec3f{
+                .x = center.x + half * side.x + half * up.x,
+                .y = center.y + half * side.y + half * up.y,
+                .z = center.z + half * side.z + half * up.z,
+            },
+            raster::Vec3f{
+                .x = center.x - half * side.x + half * up.x,
+                .y = center.y - half * side.y + half * up.y,
+                .z = center.z - half * side.z + half * up.z,
+            },
+        };
+        const raster::Vec3f facing{.x = 0.0F, .y = 0.6F, .z = 0.8F};
+        const raster::Vec3f away{.x = 0.0F, .y = -0.6F, .z = -0.8F};
+        raster::SoAMesh mesh{};
+        mesh.positions = {
+            raster::Vec3f{.x = -1.0F, .y = -1.0F, .z = 0.0F},
+            raster::Vec3f{.x = 1.0F, .y = -1.0F, .z = 0.0F},
+            raster::Vec3f{.x = 0.0F, .y = 1.0F, .z = 0.0F},
+            corners[0],
+            corners[1],
+            corners[2],
+            corners[3],
+        };
+        mesh.normals = {facing, facing, facing, away, away, away, away};
+        mesh.uvs = {
+            raster::Vec2f{.x = 0.5F, .y = 0.5F},
+            raster::Vec2f{.x = 0.5F, .y = 0.5F},
+            raster::Vec2f{.x = 0.5F, .y = 0.5F},
+            raster::Vec2f{.x = 0.5F, .y = 0.5F},
+            raster::Vec2f{.x = 0.5F, .y = 0.5F},
+            raster::Vec2f{.x = 0.5F, .y = 0.5F},
+            raster::Vec2f{.x = 0.5F, .y = 0.5F},
+        };
+        mesh.indices = {
+            0U,
+            1U,
+            2U,
+            0U,
+            2U,
+            1U,
+            3U,
+            4U,
+            5U,
+            3U,
+            5U,
+            6U,
+            3U,
+            5U,
+            4U,
+            3U,
+            6U,
+            5U,
+        };
+        return mesh;
+    }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE("occluder darkens receiver to ambient", "[scene][shadow]") {
+        // Same texel as the face-on test (0xFF336699), so unoccluded the pixel
+        // would be the texel bytes. The occluder sits 0.1667 of reverse-Z
+        // depth in front of the receiver along the sun ray — far outside any
+        // bias — so every covered receiver lane must be ambient-only:
+        // 51 * 0.4 = 20.4 -> 20, 102 * 0.4 = 40.8 -> 41,
+        // 153 * 0.4 = 61.2 -> 61. Pre-shadow code renders the lit texel, so
+        // this fails until the shadow path lands.
+        raster::TgaImage image{};
+        image.width = 1U;
+        image.height = 1U;
+        image.pixels.push_back(0xFF336699U);
+        const raster::Texture2D<raster::LayoutTiled4x4> texture{image};
+        constexpr std::size_t width = 64U;
+        constexpr std::size_t height = 64U;
+        constexpr std::uint32_t clear = 0xFF101018U;
+        constexpr std::uint32_t expected = 0xFF14293DU;
+        const raster::render::FreeLookCamera camera{
+            .position = raster::Vec3f{.x = 0.0F, .y = 0.0F, .z = 3.0F},
+            .yaw = 0.0F,
+            .pitch = 0.0F,
+        };
+        const auto mesh = make_shadow_scene();
+        REQUIRE(mesh.has_consistent_vertex_streams());
+
+        const auto check_frame = [&](const raster::Framebuffer& framebuffer) {
+            const auto colors = std::as_const(framebuffer).color_view();
+            std::size_t dark = 0U;
+            for (std::size_t y = 0; y < height; ++y) {
+                for (std::size_t x = 0; x < width; ++x) {
+                    if (colors[y, x] == expected) {
+                        ++dark;
+                    } else {
+                        REQUIRE(colors[y, x] == clear);
+                    }
+                }
+            }
+            REQUIRE(dark > 20U);
+        };
+
+        raster::Framebuffer serial{width, height};
+        REQUIRE(
+            raster::render::
+                render_scene(serial, mesh, 0U, false, true, false, false, texture, camera)
+        );
+        check_frame(serial);
+
+        raster::Framebuffer tiled{width, height};
+        raster::render::TileRenderer renderer{4U};
+        REQUIRE(renderer.render_scene(tiled, mesh, 0U, false, true, false, false, texture, camera));
+        check_frame(tiled);
+        REQUIRE(tiled.color_storage == serial.color_storage);
+    }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE("shadow rendering is deterministic", "[scene][shadow]") {
+        raster::TgaImage image{};
+        image.width = 1U;
+        image.height = 1U;
+        image.pixels.push_back(0xFF336699U);
+        const raster::Texture2D<raster::LayoutTiled4x4> texture{image};
+        const raster::render::FreeLookCamera camera{
+            .position = raster::Vec3f{.x = 0.0F, .y = 0.0F, .z = 3.0F},
+            .yaw = 0.0F,
+            .pitch = 0.0F,
+        };
+        const auto mesh = make_shadow_scene();
+        raster::Framebuffer first{64U, 64U};
+        raster::Framebuffer second{64U, 64U};
+        REQUIRE(
+            raster::render::
+                render_scene(first, mesh, 0U, false, true, false, false, texture, camera)
+        );
+        REQUIRE(
+            raster::render::
+                render_scene(second, mesh, 0U, false, true, false, false, texture, camera)
+        );
+        REQUIRE(first.color_storage == second.color_storage);
+        REQUIRE(first.depth_storage == second.depth_storage);
     }
 } // namespace
 

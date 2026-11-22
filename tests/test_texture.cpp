@@ -219,7 +219,7 @@ namespace {
                 }
                 const float lod = lods[trial % lods.size()];
                 std::array<std::uint32_t, 4> quad{};
-                texture.sample_trilinear_quad4(u.data(), v.data(), lod, quad.data());
+                texture.sample_trilinear_quad4(u, v, lod, quad);
                 for (std::size_t lane = 0; lane < 4U; ++lane) {
                     REQUIRE(quad[lane] == texture.sample_trilinear(u[lane], v[lane], lod));
                 }
