@@ -86,6 +86,88 @@ namespace {
     }
 
     // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE(
+        "warmed renderer stays allocation-free after heap churn", "[scene][allocation][aging]"
+    ) {
+        constexpr std::size_t width = 96U;
+        constexpr std::size_t height = 80U;
+        const auto mesh = raster::load_obj(
+            std::filesystem::path{RASTER_ASSET_DIR} / "models/clipping_sphere.obj"
+        );
+        REQUIRE(mesh.has_value());
+
+        raster::TgaImage image{};
+        image.width = 4U;
+        image.height = 4U;
+        image.pixels.resize(16U);
+        for (std::size_t index = 0; index < image.pixels.size(); ++index) {
+            image.pixels[index] = (index & 1U) == 0U ? 0xFFE08030U : 0xFF3050C0U;
+        }
+        const raster::Texture2D<raster::LayoutTiled4x4> texture{image};
+        const raster::render::FreeLookCamera camera{
+            .position = raster::Vec3f{.x = 0.1F, .y = -0.2F, .z = 3.5F},
+            .yaw = 0.07F,
+            .pitch = 0.03F,
+        };
+        raster::Framebuffer framebuffer{width, height};
+        raster::render::TileRenderer renderer{4U};
+        const auto render = [&]() noexcept {
+            return renderer
+                .render_scene(framebuffer, *mesh, 0U, false, true, false, false, texture, camera);
+        };
+
+        REQUIRE(render());
+        const auto expected_color = framebuffer.color_storage;
+        const auto expected_depth = framebuffer.depth_storage;
+
+        // Calibrate the probe with one deliberate allocation before trusting
+        // its zero-allocation result around the render below.
+        std::size_t detected_allocations = 0U;
+        {
+            const raster::platform::ScopedAllocationProbe probe{true};
+            std::vector<std::uint64_t> deliberate(4096U, 0xA55AA55AU);
+            REQUIRE(deliberate.front() == 0xA55AA55AU);
+            detected_allocations = probe.allocations();
+        }
+        REQUIRE(detected_allocations > 0U);
+
+        // Bounded, deterministic mixed-size churn while every render resource
+        // remains alive. This tests the actual renderer's invariant; timing is
+        // deliberately left to the heap-aging benchmark, never asserted here.
+        constexpr std::array<std::size_t, 5> block_sizes{32U, 64U, 256U, 1024U, 4096U};
+        std::vector<std::vector<std::byte>> ballast;
+        ballast.reserve(512U);
+        for (std::size_t index = 0; index < 512U; ++index) {
+            ballast.emplace_back(
+                block_sizes[index % block_sizes.size()],
+                static_cast<std::byte>(index & 0xFFU)
+            );
+        }
+        for (std::size_t index = 0; index < ballast.size(); index += 2U) {
+            std::vector<std::byte>{}.swap(ballast[index]);
+        }
+        for (std::size_t index = 0; index < 256U; ++index) {
+            ballast.emplace_back(
+                block_sizes[(index * 3U + 1U) % block_sizes.size()],
+                static_cast<std::byte>((index + 37U) & 0xFFU)
+            );
+        }
+
+        std::size_t render_allocations = 0U;
+        bool rendered = false;
+        {
+            const raster::platform::ScopedAllocationProbe probe{true};
+            rendered = render();
+            render_allocations = probe.allocations();
+        }
+        REQUIRE(rendered);
+        REQUIRE(render_allocations == 0U);
+        REQUIRE(framebuffer.color_storage == expected_color);
+        REQUIRE(framebuffer.depth_storage == expected_depth);
+        REQUIRE_FALSE(ballast.empty());
+    }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
     TEST_CASE("procedural grid mesh is watertight and faces up", "[scene][stress]") {
         const auto mesh = raster::make_grid_mesh(24U, 24U, 4.0F, -0.5F, -20.0F, 8.0F);
         REQUIRE(mesh.triangle_count() == 24U * 24U * 2U);
@@ -913,15 +995,15 @@ namespace {
     raster::SoAMesh make_shadow_scene() {
         // Receiver: face-on to the sun, so unoccluded it reproduces texels
         // (M1 face-on test). Occluder: square perpendicular to the sun through
-        // C = receiver_center - sun * 5, half-size 3 — between light and
-        // receiver along every ray through the receiver (shadow depth 0.667 vs
-        // receiver 0.5, far outside any bias), off the main view axis so the
-        // receiver pixel shows the receiver, not the occluder. The occluder is
-        // partially visible to the main camera, but its normal faces away from
-        // the sun, so it shades ambient-only: pixel-identical to the expected
-        // shadow color, and the frame check below stays exact.
+        // C = receiver_center + sun * 5, half-size 3 — between the sun-side
+        // light and the receiver along every ray through the receiver
+        // (shadow depth 0.667 vs receiver 0.5, far outside any bias). The
+        // occluder sits behind the main camera, entirely outside its frustum,
+        // so the receiver pixel shows the receiver, not the occluder. Its
+        // normals face the light, so any main-view visibility would fail
+        // loudly instead of hiding behind ambient shading.
         constexpr raster::Vec3f sun{.x = 0.0F, .y = 0.6F, .z = 0.8F};
-        constexpr raster::Vec3f center{.x = 0.0F, .y = -3.0F, .z = -4.0F};
+        constexpr raster::Vec3f center{.x = 0.0F, .y = 3.0F, .z = 4.0F};
         const auto side =
             raster::normalize(raster::cross(sun, raster::Vec3f{.x = 0.0F, .y = 1.0F, .z = 0.0F}));
         const auto up = raster::normalize(raster::cross(sun, side));
@@ -949,7 +1031,6 @@ namespace {
             },
         };
         const raster::Vec3f facing{.x = 0.0F, .y = 0.6F, .z = 0.8F};
-        const raster::Vec3f away{.x = 0.0F, .y = -0.6F, .z = -0.8F};
         raster::SoAMesh mesh{};
         mesh.positions = {
             raster::Vec3f{.x = -1.0F, .y = -1.0F, .z = 0.0F},
@@ -960,7 +1041,7 @@ namespace {
             corners[2],
             corners[3],
         };
-        mesh.normals = {facing, facing, facing, away, away, away, away};
+        mesh.normals = {facing, facing, facing, facing, facing, facing, facing};
         mesh.uvs = {
             raster::Vec2f{.x = 0.5F, .y = 0.5F},
             raster::Vec2f{.x = 0.5F, .y = 0.5F},
@@ -1046,6 +1127,50 @@ namespace {
         REQUIRE(renderer.render_scene(tiled, mesh, 0U, false, true, false, false, texture, camera));
         check_frame(tiled);
         REQUIRE(tiled.color_storage == serial.color_storage);
+    }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE("textured sphere shows lit pixels under the sun", "[scene][shadow]") {
+        // White texel: ambient-only is 0xFF666666 (255 * 0.4 = 102), while a
+        // face-on pixel reaches ~224. Anything above 150 must be sunlit, so a
+        // healthy sun + shadow pipeline shows many such pixels on a sphere
+        // facing the light. Fails if the shadow path darkens everything.
+        const auto sphere = raster::load_obj(
+            std::filesystem::path{RASTER_ASSET_DIR} / "models/clipping_sphere.obj"
+        );
+        REQUIRE(sphere.has_value());
+
+        raster::TgaImage white{};
+        white.width = 1U;
+        white.height = 1U;
+        white.pixels.push_back(0xFFFFFFFFU);
+        const raster::Texture2D<raster::LayoutTiled4x4> texture{white};
+        constexpr std::size_t width = 64U;
+        constexpr std::size_t height = 64U;
+        const raster::render::FreeLookCamera camera{
+            .position = raster::Vec3f{.x = 0.0F, .y = 0.0F, .z = 5.0F},
+            .yaw = 0.0F,
+            .pitch = 0.0F,
+        };
+
+        raster::Framebuffer framebuffer{width, height};
+        raster::render::TileRenderer renderer{4U};
+        REQUIRE(
+            renderer
+                .render_scene(framebuffer, *sphere, 0U, false, true, false, false, texture, camera)
+        );
+
+        const auto colors = std::as_const(framebuffer).color_view();
+        std::size_t lit = 0U;
+        for (std::size_t y = 0; y < height; ++y) {
+            for (std::size_t x = 0; x < width; ++x) {
+                const auto red = static_cast<int>((colors[y, x] >> 16U) & 0xFFU);
+                if (red > 150) {
+                    ++lit;
+                }
+            }
+        }
+        REQUIRE(lit > width * height / 20U);
     }
 
     // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.

@@ -57,16 +57,12 @@ namespace raster::render {
             }
         };
 
-        // Fixed sun rig shared by the light pass and the receiver lookup.
-        // Light looks from -sun * distance toward the origin; the ortho box
-        // covers the shipped scenes with margin. Clamp behavior outside:
-        // fragments outside [0, 1] in any light NDC axis count as lit.
         inline constexpr float k_shadow_eye_distance = 30.0F;
         inline constexpr float k_shadow_half_extent = 16.0F;
         inline constexpr float k_shadow_near = 15.0F;
         inline constexpr float k_shadow_far = 45.0F;
-        inline constexpr float k_shadow_bias = 0.0005F;
-        inline constexpr float k_shadow_slope = 0.002F;
+        inline constexpr float k_shadow_bias = 0.002F;
+        inline constexpr float k_shadow_slope = 0.01F;
 
         template <typename Layout> struct FloorShader final : ShaderBase {
             struct Uniforms {
@@ -984,14 +980,12 @@ namespace raster::render {
         shader.uniforms.sun_scale = 0.6F;
         shader.uniforms.shadow_bias = k_shadow_bias;
         shader.uniforms.shadow_slope = k_shadow_slope;
-        // Fixed sun rig: ortho frustum looking from -sun toward the origin.
-        // Same constants feed the shadow pass and the receiver lookup, so the
-        // two can never disagree about the light.
+
         const auto light_view = look_at4f(
             Vec3f{
-                .x = -shader.uniforms.sun_direction.x * k_shadow_eye_distance,
-                .y = -shader.uniforms.sun_direction.y * k_shadow_eye_distance,
-                .z = -shader.uniforms.sun_direction.z * k_shadow_eye_distance,
+                .x = shader.uniforms.sun_direction.x * k_shadow_eye_distance,
+                .y = shader.uniforms.sun_direction.y * k_shadow_eye_distance,
+                .z = shader.uniforms.sun_direction.z * k_shadow_eye_distance,
             },
             Vec3f{.x = 0.0F, .y = 0.0F, .z = 0.0F},
             Vec3f{.x = 0.0F, .y = 1.0F, .z = 0.0F}
@@ -1011,9 +1005,12 @@ namespace raster::render {
         FloorShader<Layout> light_shader{};
         light_shader.uniforms.model_view_projection = light_view_projection;
         light_shader.uniforms.light_view_projection = light_view_projection;
+        const bool shadows_enabled =
+            SDL_GetEnvironmentVariable(SDL_GetEnvironment(), "RASTER_NO_SHADOW") == nullptr;
         if (tile_state != nullptr) {
-            shader.uniforms.shadow_map = &tile_state->shadow_map;
-            if (!render_shadow_map(
+            shader.uniforms.shadow_map = shadows_enabled ? &tile_state->shadow_map : nullptr;
+            if (shadows_enabled
+                && !render_shadow_map(
                     tile_state->shadow_map,
                     light_shader,
                     mesh,
@@ -1034,8 +1031,9 @@ namespace raster::render {
         } else {
             thread_local ShadowMap serial_shadow{};
             thread_local std::vector<PreparedTriangle<Layout>> serial_shadow_prepared{};
-            shader.uniforms.shadow_map = &serial_shadow;
-            if (!render_shadow_map(serial_shadow, light_shader, mesh, serial_shadow_prepared)) {
+            shader.uniforms.shadow_map = shadows_enabled ? &serial_shadow : nullptr;
+            if (shadows_enabled
+                && !render_shadow_map(serial_shadow, light_shader, mesh, serial_shadow_prepared)) {
                 return false;
             }
             if (!draw_mesh(framebuffer, shader, mesh, guard_band_test)) {

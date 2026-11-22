@@ -110,6 +110,12 @@ texture-benchmark-threads: (_build preset 'raster_texture_benchmark')
 texture-benchmark-stress *args: (_build preset 'raster_texture_benchmark')
     ./{{ build_dir }}/raster_texture_benchmark scene-stress {{ args }}
 
+# Diagnostic heap-aging experiment; no timing thresholds.
+# Optional args: width height chain_nodes seed (defaults 640 480 65536 680417).
+[positional-arguments]
+heap-aging-benchmark *args: (_build preset 'raster_texture_benchmark')
+    ./{{ build_dir }}/raster_texture_benchmark heap-aging {{ args }}
+
 # Reformat all project C++ files.
 format: (_build preset 'format')
 

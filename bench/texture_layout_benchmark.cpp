@@ -5,7 +5,9 @@
 #include <exception>
 #include <filesystem>
 #include <mdspan>
+#include <memory>
 #include <print>
+#include <random>
 #include <ranges>
 #include <SDL3/SDL.h>
 #include <stdexcept>
@@ -19,6 +21,7 @@
 #include "raster/memory/soa_mesh.hpp"
 #include "raster/memory/texture.hpp"
 #include "raster/memory/texture_layout.hpp"
+#include "raster/platform/allocation_probe.hpp"
 #include "raster/render/scene_renderer.hpp"
 
 namespace {
@@ -328,6 +331,355 @@ namespace {
         benchmark_thread_scaling(mesh, texture, width, height, camera, "grid stress", 1U, 3U);
     }
 
+    struct CompactHeapNode {
+        const CompactHeapNode* next{};
+        std::uint64_t payload{};
+        std::array<std::uint64_t, 2> padding{};
+    };
+
+    struct ScatteredHeapNode {
+        const ScatteredHeapNode* next{};
+        std::uint64_t payload{};
+        std::array<std::uint64_t, 2> padding{};
+    };
+
+    static_assert(sizeof(CompactHeapNode) == 32U);
+    static_assert(sizeof(ScatteredHeapNode) == 32U);
+
+    struct CompactHeapChain {
+        std::vector<CompactHeapNode> nodes;
+
+        CompactHeapChain(std::size_t count, std::uint64_t seed) :
+            nodes(count) {
+            for (std::size_t index = 0; index < count; ++index) {
+                nodes[index].payload =
+                    seed + static_cast<std::uint64_t>(index) * 0x9E3779B97F4A7C15ULL;
+            }
+            relink();
+        }
+
+        void relink() noexcept {
+            for (std::size_t index = 0; index < nodes.size(); ++index) {
+                nodes[index].next = index + 1U < nodes.size() ? &nodes[index + 1U] : nullptr;
+            }
+        }
+    };
+
+    using ScatteredHeapChain = std::vector<std::unique_ptr<ScatteredHeapNode>>;
+
+    [[nodiscard]]
+    ScatteredHeapChain make_scattered_heap_chain(std::size_t count, std::uint64_t seed) {
+        ScatteredHeapChain storage;
+        storage.reserve(count);
+        for (std::size_t index = 0; index < count; ++index) {
+            auto node = std::make_unique<ScatteredHeapNode>();
+            node->payload = seed + static_cast<std::uint64_t>(index) * 0x9E3779B97F4A7C15ULL;
+            storage.push_back(std::move(node));
+        }
+        for (std::size_t index = 0; index + 1U < storage.size(); ++index) {
+            storage[index]->next = storage[index + 1U].get();
+        }
+        return storage;
+    }
+
+    [[nodiscard]]
+    std::uint64_t scan_heap_chain(
+        const CompactHeapChain& storage, std::size_t repetitions
+    ) noexcept {
+        if (storage.nodes.empty()) {
+            return 0U;
+        }
+
+        std::uint64_t checksum = 0U;
+        for (std::size_t repetition = 0; repetition < repetitions; ++repetition) {
+            const CompactHeapNode* node = storage.nodes.data();
+            for (std::size_t visited = 0; visited < storage.nodes.size(); ++visited) {
+                checksum = checksum * 0x100000001B3ULL + node->payload;
+                node = node->next;
+            }
+        }
+        return checksum;
+    }
+
+    [[nodiscard]]
+    std::uint64_t scan_heap_chain(
+        const ScatteredHeapChain& storage, std::size_t repetitions
+    ) noexcept {
+        if (storage.empty()) {
+            return 0U;
+        }
+
+        std::uint64_t checksum = 0U;
+        for (std::size_t repetition = 0; repetition < repetitions; ++repetition) {
+            const ScatteredHeapNode* node = storage.front().get();
+            for (std::size_t index = 0; index < storage.size(); ++index) {
+                checksum = checksum * 0x100000001B3ULL + node->payload;
+                node = node->next;
+            }
+        }
+        return checksum;
+    }
+
+    template <typename Function> [[nodiscard]]
+    std::uint64_t median_timing(Function function, std::size_t warmups, std::size_t samples) {
+        for (std::size_t warmup = 0; warmup < warmups; ++warmup) {
+            static_cast<void>(function());
+        }
+
+        std::vector<std::uint64_t> timings;
+        timings.reserve(samples);
+        std::uint64_t checksum = 0U;
+        for (std::size_t sample = 0; sample < samples; ++sample) {
+            const auto begin = SDL_GetTicksNS();
+            checksum ^= function();
+            timings.push_back(SDL_GetTicksNS() - begin);
+        }
+
+        std::ranges::sort(timings);
+        const auto median = timings[timings.size() / 2U];
+        std::vector<std::uint64_t> deviations;
+        deviations.reserve(timings.size());
+        for (const auto timing : timings) {
+            deviations.push_back(timing > median ? timing - median : median - timing);
+        }
+
+        std::ranges::sort(deviations);
+        const auto mad = deviations[deviations.size() / 2U];
+        std::println(
+            "median {:.3f} ms, MAD {:.3f} ms ({} runs), checksum={}",
+            static_cast<double>(median) / 1.0e6,
+            static_cast<double>(mad) / 1.0e6,
+            samples,
+            checksum
+        );
+        return median;
+    }
+
+    [[nodiscard]]
+    std::vector<std::vector<std::byte>> make_heap_churn(std::size_t seed, std::size_t& live_bytes) {
+        constexpr std::array<std::size_t, 5> block_sizes{32U, 64U, 256U, 1024U, 4096U};
+        constexpr std::size_t block_count = 2048U;
+
+        std::mt19937 random{static_cast<std::mt19937::result_type>(seed)};
+        std::vector<std::vector<std::byte>> ballast;
+        ballast.reserve(block_count + block_count / 2U);
+        live_bytes = 0U;
+        for (std::size_t index = 0; index < block_count; ++index) {
+            const auto size = block_sizes[random() % block_sizes.size()];
+            ballast.emplace_back(size, static_cast<std::byte>(random() & 0xFFU));
+            live_bytes += size;
+        }
+        for (std::size_t index = 0; index < ballast.size(); index += 2U) {
+            live_bytes -= ballast[index].size();
+            std::vector<std::byte>{}.swap(ballast[index]);
+        }
+        for (std::size_t index = 0; index < block_count / 2U; ++index) {
+            const auto size = block_sizes[random() % block_sizes.size()];
+            ballast.emplace_back(size, static_cast<std::byte>(random() & 0xFFU));
+            live_bytes += size;
+        }
+        return ballast;
+    }
+
+    [[nodiscard]]
+    bool render_aging_scene(
+        raster::render::TileRenderer& renderer,
+        raster::Framebuffer& framebuffer,
+        const raster::SoAMesh& mesh,
+        const raster::Texture2D<raster::LayoutTiled4x4>& texture,
+        const raster::render::FreeLookCamera& camera
+    ) noexcept {
+        return renderer
+            .render_scene(framebuffer, mesh, 0U, false, true, false, false, texture, camera);
+    }
+
+    struct AgingRenderer {
+        raster::Framebuffer framebuffer;
+        raster::render::TileRenderer renderer;
+
+        AgingRenderer(std::size_t width, std::size_t height) :
+            framebuffer{width, height},
+            renderer{4U} {}
+
+        [[nodiscard]]
+        bool render(
+            const raster::SoAMesh& mesh,
+            const raster::Texture2D<raster::LayoutTiled4x4>& texture,
+            const raster::render::FreeLookCamera& camera
+        ) noexcept {
+            return render_aging_scene(renderer, framebuffer, mesh, texture, camera);
+        }
+    };
+
+    void benchmark_heap_aging(
+        const raster::Texture2D<raster::LayoutTiled4x4>& texture,
+        std::size_t width,
+        std::size_t height,
+        std::size_t chain_count,
+        std::size_t churn_seed
+    ) {
+        constexpr std::size_t scan_repetitions = 16U;
+        constexpr std::size_t warmups = 2U;
+        constexpr std::size_t samples = 9U;
+        std::println(
+            "heap-aging: nodes={} (32 B), churn seed={}, scan repetitions={}, warmups={}, samples={} (diagnostic; no thresholds)",
+            chain_count,
+            churn_seed,
+            scan_repetitions,
+            warmups,
+            samples
+        );
+
+        const auto mesh_result = raster::load_obj(
+            std::filesystem::path{RASTER_ASSET_DIR} / "models/clipping_sphere.obj"
+        );
+        if (!mesh_result) {
+            throw std::runtime_error("could not load bundled clipping sphere OBJ");
+        }
+
+        const raster::render::FreeLookCamera camera{
+            .position = raster::Vec3f{.x = 0.1F, .y = -0.2F, .z = 3.5F},
+            .yaw = 0.07F,
+            .pitch = 0.03F,
+        };
+
+        // Fixture A is fully allocated/warmed before churn and remains live.
+        auto fixture_before = std::make_unique<AgingRenderer>(width, height);
+        const auto render_before = [&]() noexcept {
+            return fixture_before->render(*mesh_result, texture, camera);
+        };
+        if (!render_before()) {
+            throw std::runtime_error("heap-aging renderer baseline failed");
+        }
+
+        const auto expected_color = fixture_before->framebuffer.color_storage;
+        const auto expected_depth = fixture_before->framebuffer.depth_storage;
+
+        // Contiguous pointer-chain control allocated before churn and retained.
+        auto compact = CompactHeapChain{chain_count, 0x434F4D50414354ULL};
+        const auto compact_checksum = scan_heap_chain(compact, scan_repetitions);
+
+        std::println("compact chain allocated before churn:");
+        static_cast<void>(median_timing([&] {
+            return scan_heap_chain(compact, scan_repetitions);
+        }, warmups, samples));
+
+        std::size_t churn_live_bytes = 0U;
+        auto churn = make_heap_churn(churn_seed, churn_live_bytes);
+
+        // Allocate both comparison fixtures back-to-back after churn. A's
+        // allocations live from before churn; B's are new in the aged heap.
+        auto fixture_after = std::make_unique<AgingRenderer>(width, height);
+        const auto render_after = [&] noexcept {
+            return fixture_after->render(*mesh_result, texture, camera);
+        };
+
+        constexpr std::size_t pair_warmups = warmups;
+        constexpr std::size_t pair_samples = samples;
+        for (std::size_t warmup = 0; warmup < pair_warmups; ++warmup) {
+            if (!render_before() || !render_after()) {
+                throw std::runtime_error("paired renderer warmup failed");
+            }
+        }
+
+        std::array<std::uint64_t, pair_samples> before_times{};
+        std::array<std::uint64_t, pair_samples> after_times{};
+        const auto time_render = [](const auto& render_fn) {
+            const auto begin = SDL_GetTicksNS();
+            if (!render_fn()) {
+                throw std::runtime_error("paired heap-aging render failed");
+            }
+            return SDL_GetTicksNS() - begin;
+        };
+        for (std::size_t sample = 0; sample < pair_samples; ++sample) {
+            if ((sample & 1U) == 0U) {
+                before_times[sample] = time_render(render_before);
+                after_times[sample] = time_render(render_after);
+            } else {
+                after_times[sample] = time_render(render_after);
+                before_times[sample] = time_render(render_before);
+            }
+
+            if (fixture_before->framebuffer.color_storage
+                != expected_color
+                || fixture_before->framebuffer.depth_storage
+                != expected_depth
+                || fixture_after->framebuffer.color_storage
+                != expected_color
+                || fixture_after->framebuffer.depth_storage
+                != expected_depth) {
+                throw std::runtime_error("heap-aging render output changed");
+            }
+        }
+
+        const auto report_paired =
+            [pair_samples](std::string_view label, std::array<std::uint64_t, samples> times) {
+            std::ranges::sort(times);
+            const auto median = times[pair_samples / 2U];
+            std::array<std::uint64_t, samples> deviations{};
+            for (std::size_t index = 0; index < pair_samples; ++index) {
+                deviations[index] =
+                    times[index] > median ? times[index] - median : median - times[index];
+            }
+
+            std::ranges::sort(deviations);
+            std::println(
+                "{}: median {:.3f} ms, MAD {:.3f} ms ({} alternating pairs)",
+                label,
+                static_cast<double>(median) / 1.0e6,
+                static_cast<double>(deviations[pair_samples / 2U]) / 1.0e6,
+                pair_samples
+            );
+            return median;
+        };
+
+        const auto renderer_before_ns =
+            report_paired("renderer fixture allocated before churn", before_times);
+        const auto renderer_after_ns =
+            report_paired("renderer fixture allocated after churn", after_times);
+        std::println(
+            "post-churn/pre-churn fixture ratio: {:.3f} (paired diagnostic only)",
+            static_cast<double>(renderer_after_ns) / static_cast<double>(renderer_before_ns)
+        );
+
+        // The retained vector's storage cannot be relocated by churn; rescan
+        // it as the control for process-wide side-effects and verify checksum.
+        const auto post_churn_compact_checksum = scan_heap_chain(compact, scan_repetitions);
+        std::println("retained compact chain after mixed-size churn:");
+        static_cast<void>(median_timing([&] {
+            return scan_heap_chain(compact, scan_repetitions);
+        }, warmups, samples));
+        if (post_churn_compact_checksum != compact_checksum) {
+            throw std::runtime_error("compact chain checksum changed across scan phases");
+        }
+
+        // Per-node allocations expose allocator placement after churn. Keep
+        // this separate from the contiguous vector control and renderer timing.
+        auto aged = make_scattered_heap_chain(chain_count, 0x414745442D434841ULL);
+        std::println("post-churn per-node chain (placement control):");
+        static_cast<void>(median_timing([&] {
+            return scan_heap_chain(aged, scan_repetitions);
+        }, warmups, samples));
+
+        std::size_t render_allocations = 0U;
+        bool rendered = false;
+        {
+            const raster::platform::ScopedAllocationProbe probe{true};
+            rendered = render_after();
+            render_allocations = probe.allocations();
+        }
+        if (!rendered || render_allocations != 0U) {
+            throw std::runtime_error("post-churn warmed render allocated");
+        }
+
+        std::println(
+            "post-churn warmed render allocation count: {} (expected 0); churn blocks live={}, bytes={}",
+            render_allocations,
+            churn.size(),
+            churn_live_bytes
+        );
+    }
+
     [[nodiscard]]
     raster::TgaImage make_checker_4k() {
         raster::TgaImage image{};
@@ -360,8 +712,64 @@ int main(int argc, char* argv[]) noexcept {
                 == "scene-threads"
                 || first_argument
                 == "scene-stress"
+                || first_argument
+                == "heap-aging"
             ? first_argument
             : std::string_view{"fetch"};
+
+        if (selected_mode == "heap-aging") {
+            const auto parse_extent = [&](int index, std::size_t fallback) {
+                if (argc <= index) {
+                    return fallback;
+                }
+
+                const auto parsed = std::string_view(argv[index]);
+                std::size_t value = 0U;
+                for (const auto digit : parsed) {
+                    if (digit < '0' || digit > '9') {
+                        throw std::runtime_error("heap-aging arguments must be positive integers");
+                    }
+
+                    const auto numeric_digit = static_cast<std::size_t>(digit - '0');
+                    if (value > (std::numeric_limits<std::size_t>::max() - numeric_digit) / 10U) {
+                        throw std::runtime_error("heap-aging integer argument overflows size_t");
+                    }
+                    value = value * 10U + numeric_digit;
+                }
+                if (value == 0U) {
+                    throw std::runtime_error("heap-aging arguments must be positive integers");
+                }
+                return value;
+            };
+
+            constexpr std::size_t aging_texture_width = 16U;
+            constexpr std::size_t aging_texture_height = 16U;
+
+            raster::TgaImage image{};
+            image.width = aging_texture_width;
+            image.height = aging_texture_height;
+            image.pixels.resize(aging_texture_width * aging_texture_height);
+            for (std::size_t y = 0; y < aging_texture_height; ++y) {
+                for (std::size_t x = 0; x < aging_texture_width; ++x) {
+                    image.pixels[y * aging_texture_width + x] =
+                        ((x + y) & 1U) == 0U ? 0xFFE08030U : 0xFF3050C0U;
+                }
+            }
+
+            const raster::Texture2D<raster::LayoutTiled4x4> texture{image};
+            const auto width = parse_extent(2, 640U);
+            const auto height = parse_extent(3, 480U);
+            const auto chain_nodes = parse_extent(4, 65'536U);
+            const auto churn_seed = parse_extent(5, 0xA61D1U);
+            if (width > 4096U || height > 4096U || chain_nodes > 1'000'000U) {
+                throw std::runtime_error(
+                    "heap-aging limits: width/height <= 4096, chain_nodes <= 1000000"
+                );
+            }
+
+            benchmark_heap_aging(texture, width, height, chain_nodes, churn_seed);
+            return 0;
+        }
 
         const auto layout_argument_index = selected_mode == "scene" ? 2 : 1;
         const auto order_argument_index = layout_argument_index + 1;
@@ -467,7 +875,7 @@ int main(int argc, char* argv[]) noexcept {
             return 0;
         }
         if (selected_mode != "fetch") {
-            report_failure("mode must be fetch, scene, scene-threads, or scene-stress");
+            report_failure("mode must be fetch, scene, scene-threads, scene-stress, or heap-aging");
             return 2;
         }
         if ((!selected_order.empty()

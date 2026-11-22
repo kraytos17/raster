@@ -100,6 +100,7 @@ raster_apply_clang_tidy(raster)
 
 add_executable(raster_texture_benchmark
     bench/texture_layout_benchmark.cpp
+    src/platform/allocation_probe.cpp
     src/render/scene_renderer.cpp
 )
 
