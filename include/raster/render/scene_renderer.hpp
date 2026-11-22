@@ -13,7 +13,11 @@
 
 namespace raster::render {
     // Diffuse preserves the legacy byte-oriented path. Pbr requires an Srgb
-    // base-color texture; material.base_color is a linear-light multiplier.
+    // base-color texture; material holds linear-light factors. An optional
+    // metallic-roughness texture carries linear data (G = roughness,
+    // B = metallic, R/A ignored); absent channels default to 1. One
+    // descriptor applies per draw: the mesh pipeline has no per-face
+    // material groups, so per-triangle materials are out of scope.
     enum class SceneShading {
         Diffuse,
         Pbr,
@@ -54,7 +58,8 @@ namespace raster::render {
             const Texture2D<LayoutTiled4x4>& texture,
             const FreeLookCamera& camera,
             SceneShading shading = SceneShading::Diffuse,
-            const pbr::Material& material = {}
+            const pbr::Material& material = pbr::Material(),
+            const Texture2D<LayoutTiled4x4>* metallic_roughness = nullptr
         ) noexcept;
 
     private:
@@ -78,7 +83,8 @@ namespace raster::render {
         const Texture2D<LayoutTiled4x4>& texture,
         const FreeLookCamera& camera,
         SceneShading shading = SceneShading::Diffuse,
-        const pbr::Material& material = {}
+        const pbr::Material& material = pbr::Material(),
+        const Texture2D<LayoutTiled4x4>* metallic_roughness = nullptr
     ) noexcept;
 
     [[nodiscard]]

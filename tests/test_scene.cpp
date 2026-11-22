@@ -224,6 +224,182 @@ namespace {
     }
 
     // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE("PBR metallic-roughness texture modulates material per texel", "[scene][pbr]") {
+        const auto mesh = raster::load_obj(
+            std::filesystem::path{RASTER_ASSET_DIR} / "models/clipping_sphere.obj"
+        );
+        REQUIRE(mesh.has_value());
+
+        raster::TgaImage base_image{};
+        base_image.width = 1U;
+        base_image.height = 1U;
+        base_image.pixels = {0xFFB08050U};
+        const raster::Texture2D<raster::LayoutTiled4x4> base_texture{
+            base_image,
+            raster::TextureColorSpace::Srgb
+        };
+        // G = roughness, B = metallic; R/A ignored.
+        raster::TgaImage rough_dielectric_image{};
+        rough_dielectric_image.width = 1U;
+        rough_dielectric_image.height = 1U;
+        rough_dielectric_image.pixels = {0xFF00FF00U}; // G=255 rough, B=0 metal
+        const raster::Texture2D<raster::LayoutTiled4x4> rough_dielectric{rough_dielectric_image};
+        raster::TgaImage smooth_metal_image{};
+        smooth_metal_image.width = 1U;
+        smooth_metal_image.height = 1U;
+        smooth_metal_image.pixels = {0xFF0000FFU}; // G=0 rough, B=255 metal
+        const raster::Texture2D<raster::LayoutTiled4x4> smooth_metal{smooth_metal_image};
+
+        const raster::render::FreeLookCamera camera{
+            .position = raster::Vec3f{.x = 0.1F, .y = -0.2F, .z = 3.5F},
+            .yaw = 0.07F,
+            .pitch = 0.03F,
+        };
+        constexpr raster::pbr::Material factors{
+            .base_color = raster::Vec3f{.x = 1.0F, .y = 1.0F, .z = 1.0F},
+            .metallic = 1.0F,
+            .perceptual_roughness = 1.0F,
+        };
+        constexpr std::size_t width = 96U;
+        constexpr std::size_t height = 80U;
+        raster::Framebuffer serial_rough{width, height};
+        raster::Framebuffer serial_metal{width, height};
+        raster::Framebuffer tiled_metal{width, height};
+        raster::Framebuffer reference_metal{width, height};
+        REQUIRE(
+            raster::render::render_scene(
+                serial_rough,
+                *mesh,
+                0U,
+                false,
+                true,
+                false,
+                false,
+                base_texture,
+                camera,
+                raster::render::SceneShading::Pbr,
+                factors,
+                &rough_dielectric
+            )
+        );
+        REQUIRE(
+            raster::render::render_scene(
+                serial_metal,
+                *mesh,
+                0U,
+                false,
+                true,
+                false,
+                false,
+                base_texture,
+                camera,
+                raster::render::SceneShading::Pbr,
+                factors,
+                &smooth_metal
+            )
+        );
+        REQUIRE(serial_rough.color_storage != serial_metal.color_storage);
+        auto equivalent_factors = factors;
+        equivalent_factors.perceptual_roughness = 0.0F;
+        REQUIRE(
+            raster::render::render_scene(
+                reference_metal,
+                *mesh,
+                0U,
+                false,
+                true,
+                false,
+                false,
+                base_texture,
+                camera,
+                raster::render::SceneShading::Pbr,
+                equivalent_factors
+            )
+        );
+        REQUIRE(reference_metal.color_storage == serial_metal.color_storage);
+        REQUIRE(reference_metal.depth_storage == serial_metal.depth_storage);
+
+        raster::render::TileRenderer renderer{4U};
+        REQUIRE(renderer.render_scene(
+            tiled_metal,
+            *mesh,
+            0U,
+            false,
+            true,
+            false,
+            false,
+            base_texture,
+            camera,
+            raster::render::SceneShading::Pbr,
+            factors,
+            &smooth_metal
+        ));
+        REQUIRE(tiled_metal.color_storage == serial_metal.color_storage);
+        REQUIRE(tiled_metal.depth_storage == serial_metal.depth_storage);
+        std::size_t mr_allocations = 0U;
+        bool mr_warmed = false;
+        {
+            const raster::platform::ScopedAllocationProbe probe{true};
+            mr_warmed = renderer.render_scene(
+                tiled_metal,
+                *mesh,
+                0U,
+                false,
+                true,
+                false,
+                false,
+                base_texture,
+                camera,
+                raster::render::SceneShading::Pbr,
+                factors,
+                &smooth_metal
+            );
+            mr_allocations = probe.allocations();
+        }
+        REQUIRE(mr_warmed);
+        REQUIRE(mr_allocations == 0U);
+
+        // Data textures must stay linear: an sRGB mr texture is rejected.
+        const raster::Texture2D<raster::LayoutTiled4x4> srgb_mr{
+            smooth_metal_image,
+            raster::TextureColorSpace::Srgb
+        };
+        REQUIRE_FALSE(
+            raster::render::render_scene(
+                tiled_metal,
+                *mesh,
+                0U,
+                false,
+                true,
+                false,
+                false,
+                base_texture,
+                camera,
+                raster::render::SceneShading::Pbr,
+                factors,
+                &srgb_mr
+            )
+        );
+        const raster::Texture2D<raster::LayoutTiled4x4> empty_mr{};
+        REQUIRE_FALSE(
+            raster::render::render_scene(
+                tiled_metal,
+                *mesh,
+                0U,
+                false,
+                true,
+                false,
+                false,
+                base_texture,
+                camera,
+                raster::render::SceneShading::Pbr,
+                factors,
+                &empty_mr
+            )
+        );
+    }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
     TEST_CASE("PBR preserves fill under shadows and sRGB-encodes output", "[scene][pbr]") {
         raster::TgaImage image{};
         image.width = 1U;

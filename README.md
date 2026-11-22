@@ -61,6 +61,29 @@ just run                                  # build and run
 
 Override defaults locally by setting `RASTER_PRESET` / `RASTER_JOBS` or copying `.env.example` to `.env`. An opt-in pre-commit format hook is available via `just hooks-install`.
 
+### PBR material data
+
+The programmatic scene renderer supports one metallic-roughness material per draw. Pass
+`SceneShading::Pbr`, a `pbr::Material` with linear RGB base-color, metallic and roughness
+factors, an sRGB base-color texture, and optionally an `EncodedBytes` metallic-roughness
+texture. The data texture uses G for perceptual roughness and B for metallic; missing
+textures leave both factors unchanged. Textures are borrowed and must remain alive for
+the duration of the render call. Each texture gets its own mip LOD based on its size.
+
+`pbr::parse_material_buffer` accepts a small project-specific factor descriptor, not MTL
+or glTF. Blank lines and `#` comments are allowed; omitted fields use the `Material`
+defaults, and finite values are clamped to `[0,1]`:
+
+```text
+base_color 0.8 0.4 0.2  # linear RGB factors
+metallic 0.5
+roughness 0.3
+```
+
+The caller supplies the descriptor contents and texture references; the application
+does not yet load these descriptors automatically. OBJ `usemtl`/groups are not mapped
+to render materials: per-face materials and full glTF import remain future work.
+
 ## Roadmap
 
 - [x] **M1 — Framebuffer & SDL3 shell:** Callback lifecycle, HiDPI resize/minimize handling, aligned `mdspan` buffers.

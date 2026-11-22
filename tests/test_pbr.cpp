@@ -126,6 +126,51 @@ namespace {
         REQUIRE(std::fabs(brdf.y - expected) < 1.0e-7F);
         REQUIRE(std::fabs(brdf.z - expected) < 1.0e-7F);
     }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE("textured factors combine base color with G/B data channels", "[pbr][material]") {
+        constexpr raster::pbr::Material factors{
+            .base_color = raster::Vec3f{.x = 1.0F, .y = 0.5F, .z = 0.25F},
+            .metallic = 0.5F,
+            .perceptual_roughness = 0.8F,
+        };
+        constexpr raster::Vec3f base_linear{.x = 0.5F, .y = 0.25F, .z = 1.0F};
+        // R ignored, G = roughness texel, B = metallic texel.
+        constexpr raster::Vec3f mr_linear{.x = 0.0F, .y = 0.5F, .z = 1.0F};
+        const auto resolved =
+            raster::pbr::resolve_textured_material(factors, base_linear, mr_linear, true);
+        REQUIRE(resolved.base_color.x == 0.5F);
+        REQUIRE(resolved.base_color.y == 0.125F);
+        REQUIRE(resolved.base_color.z == 0.25F);
+        REQUIRE(resolved.metallic == 0.5F);
+        REQUIRE(resolved.perceptual_roughness == 0.4F);
+
+        const auto no_map =
+            raster::pbr::resolve_textured_material(factors, base_linear, mr_linear, false);
+        REQUIRE(no_map.metallic == 0.5F);
+        REQUIRE(no_map.perceptual_roughness == 0.8F);
+        REQUIRE(no_map.base_color.x == 0.5F);
+    }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE("project material descriptor parses factors and rejects junk", "[pbr][material]") {
+        constexpr std::string_view good =
+            "# dielectric\nbase_color 1.0 0.5 0.25\nmetallic 0.2\nroughness 0.6\n";
+        const auto material = raster::pbr::parse_material_buffer(good);
+        REQUIRE(material.has_value());
+        REQUIRE(material->base_color.x == 1.0F);
+        REQUIRE(material->base_color.y == 0.5F);
+        REQUIRE(material->base_color.z == 0.25F);
+        REQUIRE(material->metallic == 0.2F);
+        REQUIRE(material->perceptual_roughness == 0.6F);
+        REQUIRE_FALSE(raster::pbr::parse_material_buffer("metallic nope\n").has_value());
+        REQUIRE_FALSE(raster::pbr::parse_material_buffer("").has_value());
+        REQUIRE_FALSE(raster::pbr::parse_material_buffer("metallic nan\n").has_value());
+        REQUIRE_FALSE(raster::pbr::parse_material_buffer("roughness inf\n").has_value());
+        REQUIRE_FALSE(raster::pbr::parse_material_buffer("base_color 0 1 nan\n").has_value());
+        REQUIRE_FALSE(raster::pbr::parse_material_buffer("base_color 0 1\n").has_value());
+        REQUIRE_FALSE(raster::pbr::parse_material_buffer("unknown 1\n").has_value());
+    }
 } // namespace
 
 #if defined(__clang__)

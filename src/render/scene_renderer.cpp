@@ -69,6 +69,7 @@ namespace raster::render {
                 Mat4f model_view_projection{};
                 Mat4f light_view_projection{};
                 const Texture2D<Layout>* texture{};
+                const Texture2D<Layout>* metallic_roughness_texture{};
                 const ShadowMap* shadow_map{};
                 bool solid_color_debug{};
                 SceneShading shading{SceneShading::Diffuse};
@@ -90,6 +91,7 @@ namespace raster::render {
                 Vec3f position{};
                 Vec4f light_clip{};
                 float mip_lod{};
+                float metallic_roughness_lod{};
 
                 [[nodiscard]]
                 constexpr auto attributes(this auto&& self) noexcept {
@@ -127,14 +129,12 @@ namespace raster::render {
 
             [[nodiscard]]
             Vec3f shade_pbr(
-                Vec3f base_color, Vec3f position, Vec3f normal, bool lit
+                const pbr::Material& resolved, Vec3f position, Vec3f normal, bool lit
             ) const noexcept {
                 const auto n = normalize(normal);
                 const auto view = normalize(uniforms.eye_position - position);
-                auto material = uniforms.material;
-                material.base_color = base_color;
                 const auto direct = pbr::evaluate_direct(
-                    material,
+                    resolved,
                     n,
                     view,
                     uniforms.sun_direction,
@@ -147,11 +147,11 @@ namespace raster::render {
                 );
                 // Deliberately non-physical linear fill remains independent of
                 // shadow visibility; it is not part of the direct BRDF.
-                const auto fill = uniforms.ambient * (1.0F - pbr::saturate(material.metallic));
+                const auto fill = uniforms.ambient * (1.0F - pbr::saturate(resolved.metallic));
                 return Vec3f{
-                    .x = direct.x + base_color.x * fill,
-                    .y = direct.y + base_color.y * fill,
-                    .z = direct.z + base_color.z * fill,
+                    .x = direct.x + resolved.base_color.x * fill,
+                    .y = direct.y + resolved.base_color.y * fill,
+                    .z = direct.z + resolved.base_color.z * fill,
                 };
             }
 
@@ -243,19 +243,40 @@ namespace raster::render {
                           .z = static_cast<float>(texel & 0xFFU) / 255.0F,
                           .w = 1.0F,
                       };
+
                 const Vec3f texture_color{.x = sampled.x, .y = sampled.y, .z = sampled.z};
-                const Vec3f albedo{
-                    .x = texture_color.x * uniforms.material.base_color.x,
-                    .y = texture_color.y * uniforms.material.base_color.y,
-                    .z = texture_color.z * uniforms.material.base_color.z,
-                };
+                Vec4f mr_sample{.x = 0.0F, .y = 1.0F, .z = 1.0F, .w = 1.0F};
+                if (textured && use_pbr && uniforms.metallic_roughness_texture != nullptr) {
+                    mr_sample = uniforms.metallic_roughness_texture->sample_trilinear_linear(
+                        varying.uv.x,
+                        varying.uv.y,
+                        varying.metallic_roughness_lod
+                    );
+                }
+
+                const auto resolved = pbr::resolve_textured_material(
+                    uniforms.material,
+                    texture_color,
+                    Vec3f{.x = mr_sample.x, .y = mr_sample.y, .z = mr_sample.z},
+                    uniforms.metallic_roughness_texture != nullptr
+                );
 
                 // Solid and checker diagnostics stay unlit; only the textured
                 // path goes through the sun and the shadow map.
                 const bool lit = textured && shadow_lit(varying.light_clip, varying.normal);
-                const auto shaded = !textured ? texture_color
-                    : use_pbr ? shade_pbr(albedo, varying.position, varying.normal, lit)
-                              : shade_lit(albedo, varying.normal, lit);
+                Vec3f shaded = texture_color;
+                if (textured) {
+                    if (use_pbr) {
+                        shaded = shade_pbr(resolved, varying.position, varying.normal, lit);
+                    } else {
+                        const Vec3f albedo{
+                            .x = texture_color.x * uniforms.material.base_color.x,
+                            .y = texture_color.y * uniforms.material.base_color.y,
+                            .z = texture_color.z * uniforms.material.base_color.z,
+                        };
+                        shaded = shade_lit(albedo, varying.normal, lit);
+                    }
+                }
 
                 const bool pbr_output = textured && uniforms.shading == SceneShading::Pbr;
                 return Vec4f{
@@ -287,7 +308,8 @@ namespace raster::render {
             const std::array<Vec3f, 4>& quad_normal,
             const std::array<Vec3f, 4>& quad_position,
             const std::array<Vec4f, 4>& quad_light,
-            float lod
+            float lod,
+            float mr_lod
         ) noexcept {
             static const bool profile =
                 SDL_GetEnvironmentVariable(SDL_GetEnvironment(), "RASTER_PROFILE") != nullptr;
@@ -316,15 +338,24 @@ namespace raster::render {
                         quad_uv[lane].y,
                         lod
                     );
-                    const auto base_color = Vec3f{
-                        .x = sampled.x * shader.uniforms.material.base_color.x,
-                        .y = sampled.y * shader.uniforms.material.base_color.y,
-                        .z = sampled.z * shader.uniforms.material.base_color.z,
-                    };
+
+                    Vec4f mr_sample{.x = 0.0F, .y = 1.0F, .z = 1.0F, .w = 1.0F};
+                    if (shader.uniforms.metallic_roughness_texture != nullptr) {
+                        mr_sample =
+                            shader.uniforms.metallic_roughness_texture
+                                ->sample_trilinear_linear(quad_uv[lane].x, quad_uv[lane].y, mr_lod);
+                    }
+
+                    const auto resolved = pbr::resolve_textured_material(
+                        shader.uniforms.material,
+                        Vec3f{.x = sampled.x, .y = sampled.y, .z = sampled.z},
+                        Vec3f{.x = mr_sample.x, .y = mr_sample.y, .z = mr_sample.z},
+                        shader.uniforms.metallic_roughness_texture != nullptr
+                    );
 
                     const auto lit = shader.shadow_lit(quad_light[lane], quad_normal[lane]);
                     const auto shaded =
-                        shader.shade_pbr(base_color, quad_position[lane], quad_normal[lane], lit);
+                        shader.shade_pbr(resolved, quad_position[lane], quad_normal[lane], lit);
                     color[quad_y + (lane >> 1U), quad_x + (lane & 1U)] = pack_channels({
                         linear_to_srgb(shaded.z) * 255.0F,
                         linear_to_srgb(shaded.y) * 255.0F,
@@ -415,6 +446,7 @@ namespace raster::render {
                         .position = quad_position[lane],
                         .light_clip = quad_light[lane],
                         .mip_lod = lod,
+                        .metallic_roughness_lod = mr_lod,
                     }
                 );
 
@@ -560,6 +592,14 @@ namespace raster::render {
                     shader.uniforms.texture->width(),
                     shader.uniforms.texture->height()
                 );
+
+                const auto mr_lod = shader.uniforms.metallic_roughness_texture != nullptr
+                    ? mip_lod(
+                          derivatives,
+                          shader.uniforms.metallic_roughness_texture->width(),
+                          shader.uniforms.metallic_roughness_texture->height()
+                      )
+                    : lod;
                 store_shaded_quad(
                     color,
                     shader,
@@ -571,7 +611,8 @@ namespace raster::render {
                     quad_normal,
                     quad_position,
                     quad_light,
-                    lod
+                    lod,
+                    mr_lod
                 );
             }
             );
@@ -753,6 +794,14 @@ namespace raster::render {
                     shader.uniforms.texture->width(),
                     shader.uniforms.texture->height()
                 );
+
+                const auto mr_lod = shader.uniforms.metallic_roughness_texture != nullptr
+                    ? mip_lod(
+                          derivatives,
+                          shader.uniforms.metallic_roughness_texture->width(),
+                          shader.uniforms.metallic_roughness_texture->height()
+                      )
+                    : lod;
                 store_shaded_quad(
                     color,
                     shader,
@@ -764,7 +813,8 @@ namespace raster::render {
                     quad_normal,
                     quad_position,
                     quad_light,
-                    lod
+                    lod,
+                    mr_lod
                 );
             },
                 region
@@ -1018,14 +1068,27 @@ namespace raster::render {
         SceneShading shading,
         const pbr::Material& material,
         bool draw_overlay,
-        TileRenderState<Layout>* tile_state = nullptr
+        TileRenderState<Layout>* tile_state = nullptr,
+        const Texture2D<Layout>* metallic_roughness = nullptr
     ) noexcept {
         const auto width = framebuffer.width;
         const auto height = framebuffer.height;
         if (width < 2U || height < 2U) {
             return true;
         }
-        if (shading == SceneShading::Pbr && texture.color_space() != TextureColorSpace::Srgb) {
+        if (shading
+            == SceneShading::Pbr
+            && (texture.level_count() == 0U || texture.color_space() != TextureColorSpace::Srgb)) {
+            return false;
+        }
+        if (shading
+            == SceneShading::Pbr
+            && metallic_roughness
+            != nullptr
+            && (metallic_roughness->level_count()
+                == 0U
+                || metallic_roughness->color_space()
+                != TextureColorSpace::EncodedBytes)) {
             return false;
         }
 
@@ -1083,6 +1146,7 @@ namespace raster::render {
         FloorShader<Layout> shader{};
         shader.uniforms.model_view_projection = projection * view;
         shader.uniforms.texture = &texture;
+        shader.uniforms.metallic_roughness_texture = metallic_roughness;
         shader.uniforms.solid_color_debug = solid_color_debug;
         shader.uniforms.shading = shading;
         shader.uniforms.material = material;
@@ -1190,9 +1254,10 @@ namespace raster::render {
         const Texture2D<LayoutTiled4x4>& texture,
         const FreeLookCamera& camera,
         SceneShading shading,
-        const pbr::Material& material
+        const pbr::Material& material,
+        const Texture2D<LayoutTiled4x4>* metallic_roughness
     ) noexcept {
-        return render_scene_impl(
+        return render_scene_impl<LayoutTiled4x4>(
             framebuffer,
             mesh,
             elapsed_ns,
@@ -1204,7 +1269,9 @@ namespace raster::render {
             camera,
             shading,
             material,
-            true
+            true,
+            nullptr,
+            metallic_roughness
         );
     }
 
@@ -1226,7 +1293,8 @@ namespace raster::render {
         const Texture2D<LayoutTiled4x4>& texture,
         const FreeLookCamera& camera,
         SceneShading shading,
-        const pbr::Material& material
+        const pbr::Material& material,
+        const Texture2D<LayoutTiled4x4>* metallic_roughness
     ) noexcept {
         return render_scene_impl(
             framebuffer,
@@ -1241,7 +1309,8 @@ namespace raster::render {
             shading,
             material,
             true,
-            impl_.get()
+            impl_.get(),
+            metallic_roughness
         );
     }
 

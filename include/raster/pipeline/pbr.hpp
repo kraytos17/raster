@@ -1,8 +1,12 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
+#include <charconv>
 #include <cmath>
+#include <expected>
 #include <numbers>
+#include <string_view>
 
 #include "raster/math/vec.hpp"
 
@@ -183,5 +187,178 @@ namespace raster::pbr {
             .y = brdf.y * sun_radiance.y * scale,
             .z = brdf.z * sun_radiance.z * scale,
         };
+    }
+
+    // Combine per-draw factors with texture samples. base_linear is the
+    // sRGB-decoded base-color texel; mr_linear is the linear mr texel with
+    // G = roughness and B = metallic (R/A ignored, glTF convention).
+    // Without an mr texture the factors are used directly (absent channels
+    // default to 1, so factor * 1 == factor).
+    [[nodiscard]]
+    inline Material resolve_textured_material(
+        const Material& factors, Vec3f base_linear, Vec3f mr_linear, bool has_mr_texture
+    ) noexcept {
+        const auto metallic = saturate(factors.metallic * (has_mr_texture ? mr_linear.z : 1.0f));
+        const auto roughness =
+            saturate(factors.perceptual_roughness * (has_mr_texture ? mr_linear.y : 1.0f));
+        return Material{
+            .base_color =
+                Vec3f{
+                    .x = saturate(factors.base_color.x * base_linear.x),
+                    .y = saturate(factors.base_color.y * base_linear.y),
+                    .z = saturate(factors.base_color.z * base_linear.z),
+                },
+            .metallic = metallic,
+            .perceptual_roughness = roughness,
+        };
+    }
+
+    enum class MaterialParseError {
+        Empty,
+        Malformed,
+    };
+
+    namespace detail {
+        [[nodiscard]]
+        inline std::string_view trim_material_text(std::string_view text) noexcept {
+            while (!text.empty()
+                   && (text.front()
+                       == ' '
+                       || text.front()
+                       == '\t'
+                       || text.front()
+                       == '\r'
+                       || text.front()
+                       == '\n')) {
+                text.remove_prefix(1);
+            }
+            while (!text.empty()
+                   && (text.back()
+                       == ' '
+                       || text.back()
+                       == '\t'
+                       || text.back()
+                       == '\r'
+                       || text.back()
+                       == '\n')) {
+                text.remove_suffix(1);
+            }
+            return text;
+        }
+
+        [[nodiscard]]
+        inline std::expected<float, MaterialParseError> parse_material_float(
+            std::string_view token
+        ) noexcept {
+            float value{};
+            const auto [end, error] = std::from_chars(
+                token.data(),
+                token.data() + token.size(),
+                value,
+                std::chars_format::general
+            );
+            if (error
+                != std::errc{}
+                || end
+                != token.data()
+                + token.size()
+                || !std::isfinite(value)) {
+                return std::unexpected{MaterialParseError::Malformed};
+            }
+            return value;
+        }
+    } // namespace detail
+
+    // Minimal project-owned material descriptor (not MTL/glTF):
+    //   base_color r g b
+    //   metallic m
+    //   roughness r
+    // Blank lines and `#` comments ignored. Missing keys keep Material
+    // defaults (white base, metallic 0, roughness 1); values saturate to
+    // [0,1]. Per-face/per-group materials are out of scope: one descriptor
+    // applies to the whole draw, matching the renderer's per-draw uniforms.
+    [[nodiscard]]
+    inline std::expected<Material, MaterialParseError> parse_material_buffer(
+        std::string_view source
+    ) noexcept {
+        Material out{};
+        bool saw_any = false;
+        std::size_t offset = 0;
+        while (offset < source.size()) {
+            const auto newline = source.find('\n', offset);
+            const auto end = newline == std::string_view::npos ? source.size() : newline;
+            auto line = detail::trim_material_text(source.substr(offset, end - offset));
+            offset = newline == std::string_view::npos ? source.size() : newline + 1;
+            if (line.empty() || line.front() == '#') {
+                continue;
+            }
+            if (const auto comment = line.find('#'); comment != std::string_view::npos) {
+                line = detail::trim_material_text(line.substr(0, comment));
+                if (line.empty()) {
+                    continue;
+                }
+            }
+
+            const auto separator = line.find_first_of(" \t");
+            const auto keyword =
+                separator == std::string_view::npos ? line : line.substr(0, separator);
+            auto payload = separator == std::string_view::npos
+                ? std::string_view{}
+                : detail::trim_material_text(line.substr(separator + 1));
+            if (keyword == "base_color") {
+                std::array<float, 3> channels{};
+                for (auto& channel : channels) {
+                    if (payload.empty()) {
+                        return std::unexpected{MaterialParseError::Malformed};
+                    }
+
+                    const auto token_end = payload.find_first_of(" \t");
+                    const auto token = token_end == std::string_view::npos
+                        ? payload
+                        : payload.substr(0, token_end);
+
+                    const auto parsed = detail::parse_material_float(token);
+                    if (!parsed) {
+                        return std::unexpected{parsed.error()};
+                    }
+
+                    channel = *parsed;
+                    payload = token_end == std::string_view::npos
+                        ? std::string_view{}
+                        : detail::trim_material_text(payload.substr(token_end + 1));
+                }
+                if (!payload.empty()) {
+                    return std::unexpected{MaterialParseError::Malformed};
+                }
+
+                out.base_color = Vec3f{
+                    .x = saturate(channels[0]),
+                    .y = saturate(channels[1]),
+                    .z = saturate(channels[2]),
+                };
+                saw_any = true;
+            } else if (keyword == "metallic" || keyword == "roughness") {
+                if (payload.empty() || payload.find_first_of(" \t") != std::string_view::npos) {
+                    return std::unexpected{MaterialParseError::Malformed};
+                }
+
+                const auto parsed = detail::parse_material_float(payload);
+                if (!parsed) {
+                    return std::unexpected{parsed.error()};
+                }
+                if (keyword == "metallic") {
+                    out.metallic = saturate(*parsed);
+                } else {
+                    out.perceptual_roughness = saturate(*parsed);
+                }
+                saw_any = true;
+            } else {
+                return std::unexpected{MaterialParseError::Malformed};
+            }
+        }
+        if (!saw_any) {
+            return std::unexpected{MaterialParseError::Empty};
+        }
+        return out;
     }
 } // namespace raster::pbr
