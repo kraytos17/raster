@@ -66,6 +66,7 @@ target_sources(raster_engine INTERFACE
         include/raster/memory/texture.hpp
         include/raster/memory/texture_layout.hpp
         include/raster/pipeline/clipper.hpp
+        include/raster/pipeline/pbr.hpp
         include/raster/pipeline/rasterizer.hpp
         include/raster/pipeline/simd_quad.hpp
         include/raster/pipeline/tile_binner.hpp
@@ -100,7 +101,6 @@ raster_apply_clang_tidy(raster)
 
 add_executable(raster_texture_benchmark
     bench/texture_layout_benchmark.cpp
-    src/platform/allocation_probe.cpp
     src/render/scene_renderer.cpp
 )
 
@@ -132,6 +132,7 @@ if(RASTER_BUILD_TESTS)
         tests/test_framebuffer.cpp
         tests/test_clipper.cpp
         tests/test_math.cpp
+        tests/test_pbr.cpp
         tests/test_asset_loaders.cpp
         tests/test_rasterizer.cpp
         tests/test_scene.cpp

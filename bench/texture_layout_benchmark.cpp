@@ -21,7 +21,6 @@
 #include "raster/memory/soa_mesh.hpp"
 #include "raster/memory/texture.hpp"
 #include "raster/memory/texture_layout.hpp"
-#include "raster/platform/allocation_probe.hpp"
 #include "raster/render/scene_renderer.hpp"
 
 namespace {
@@ -543,6 +542,15 @@ namespace {
             .pitch = 0.03F,
         };
 
+        // Allocate the synthetic contiguous control before either renderer
+        // fixture so it cannot explain a pre/post placement difference.
+        auto compact = CompactHeapChain{chain_count, 0x434F4D50414354ULL};
+        const auto compact_checksum = scan_heap_chain(compact, scan_repetitions);
+        std::println("contiguous chain before churn:");
+        static_cast<void>(median_timing([&] {
+            return scan_heap_chain(compact, scan_repetitions);
+        }, warmups, samples));
+
         // Fixture A is fully allocated/warmed before churn and remains live.
         auto fixture_before = std::make_unique<AgingRenderer>(width, height);
         const auto render_before = [&]() noexcept {
@@ -554,15 +562,6 @@ namespace {
 
         const auto expected_color = fixture_before->framebuffer.color_storage;
         const auto expected_depth = fixture_before->framebuffer.depth_storage;
-
-        // Contiguous pointer-chain control allocated before churn and retained.
-        auto compact = CompactHeapChain{chain_count, 0x434F4D50414354ULL};
-        const auto compact_checksum = scan_heap_chain(compact, scan_repetitions);
-
-        std::println("compact chain allocated before churn:");
-        static_cast<void>(median_timing([&] {
-            return scan_heap_chain(compact, scan_repetitions);
-        }, warmups, samples));
 
         std::size_t churn_live_bytes = 0U;
         auto churn = make_heap_churn(churn_seed, churn_live_bytes);
@@ -644,6 +643,11 @@ namespace {
 
         // The retained vector's storage cannot be relocated by churn; rescan
         // it as the control for process-wide side-effects and verify checksum.
+        std::println("same contiguous chain after churn:");
+        static_cast<void>(median_timing([&] {
+            return scan_heap_chain(compact, scan_repetitions);
+        }, warmups, samples));
+
         const auto post_churn_compact_checksum = scan_heap_chain(compact, scan_repetitions);
         std::println("retained compact chain after mixed-size churn:");
         static_cast<void>(median_timing([&] {
@@ -661,20 +665,11 @@ namespace {
             return scan_heap_chain(aged, scan_repetitions);
         }, warmups, samples));
 
-        std::size_t render_allocations = 0U;
-        bool rendered = false;
-        {
-            const raster::platform::ScopedAllocationProbe probe{true};
-            rendered = render_after();
-            render_allocations = probe.allocations();
+        if (!render_after()) {
+            throw std::runtime_error("post-churn warmed render failed");
         }
-        if (!rendered || render_allocations != 0U) {
-            throw std::runtime_error("post-churn warmed render allocated");
-        }
-
         std::println(
-            "post-churn warmed render allocation count: {} (expected 0); churn blocks live={}, bytes={}",
-            render_allocations,
+            "churn blocks live={}, bytes={}; allocation invariant is checked by the dedicated Catch2 test",
             churn.size(),
             churn_live_bytes
         );
