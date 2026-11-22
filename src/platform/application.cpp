@@ -9,11 +9,13 @@
 #include <cstring>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <print>
 #include <SDL3/SDL.h>
 #include <thread>
 
 #include "raster/io/obj_loader.hpp"
+#include "raster/io/pbr_material_loader.hpp"
 #include "raster/io/tga_loader.hpp"
 #include "raster/memory/framebuffer.hpp"
 #include "raster/memory/soa_mesh.hpp"
@@ -58,6 +60,11 @@ namespace raster::platform {
             raster::SoAMesh mesh{};
             raster::TgaImage checker_texture{};
             raster::Texture2D<raster::LayoutTiled4x4> texture{};
+            raster::pbr::Material pbr_factors{};
+            raster::Texture2D<raster::LayoutTiled4x4> pbr_base_color_texture{};
+            raster::Texture2D<raster::LayoutTiled4x4> pbr_metallic_roughness_texture{};
+            bool pbr_material_loaded{};
+            bool pbr_has_metallic_roughness_texture{};
             raster::render::TileRenderer tile_renderer{raster::resolve_tile_workers(
                 static_cast<std::size_t>(std::thread::hardware_concurrency()),
                 requested_tile_workers()
@@ -134,6 +141,36 @@ namespace raster::platform {
 
             state.checker_texture = std::move(*texture);
             state.texture = raster::Texture2D<raster::LayoutTiled4x4>{state.checker_texture};
+            if (const auto* const descriptor =
+                    SDL_GetEnvironmentVariable(SDL_GetEnvironment(), "RASTER_PBR_MATERIAL");
+                descriptor != nullptr) {
+                const std::filesystem::path descriptor_path{descriptor};
+                const auto resolved_descriptor =
+                    descriptor_path.is_absolute() ? descriptor_path : assets / descriptor_path;
+
+                auto pbr_material = raster::load_pbr_material(resolved_descriptor);
+                if (!pbr_material) {
+                    std::println(
+                        stderr,
+                        "raster: PBR material load failed ({})",
+                        static_cast<int>(pbr_material.error())
+                    );
+                    return false;
+                }
+                if (!pbr_material->base_color_texture.has_value()) {
+                    std::println(stderr, "raster: PBR material requires base_color_texture");
+                    return false;
+                }
+
+                state.pbr_factors = pbr_material->factors;
+                state.pbr_base_color_texture = std::move(pbr_material->base_color_texture.value());
+                if (pbr_material->metallic_roughness_texture.has_value()) {
+                    state.pbr_metallic_roughness_texture =
+                        std::move(pbr_material->metallic_roughness_texture.value());
+                    state.pbr_has_metallic_roughness_texture = true;
+                }
+                state.pbr_material_loaded = true;
+            }
             return true;
         }
 
@@ -425,6 +462,13 @@ namespace raster::platform {
         auto& render_target = state.free_look_test && state.free_look_framebuffer
             ? *state.free_look_framebuffer
             : state.framebuffer;
+
+        const auto use_pbr = state.pbr_material_loaded;
+        const auto* base_color_texture = use_pbr ? &state.pbr_base_color_texture : &state.texture;
+        const auto* metallic_roughness = use_pbr && state.pbr_has_metallic_roughness_texture
+            ? &state.pbr_metallic_roughness_texture
+            : nullptr;
+
         const auto check_render_allocations = state.clip_stress_test && state.tile_renderer_warmed;
         bool rendered = false;
         std::size_t allocation_count = 0;
@@ -441,8 +485,11 @@ namespace raster::platform {
                 state.free_look_test,
                 state.guard_band_test,
                 state.solid_color_debug,
-                state.texture,
-                state.camera
+                *base_color_texture,
+                state.camera,
+                use_pbr ? raster::render::SceneShading::Pbr : raster::render::SceneShading::Diffuse,
+                state.pbr_factors,
+                metallic_roughness
             );
             if (rendered && state.free_look_test && state.free_look_framebuffer) {
                 upscale_nearest(*state.free_look_framebuffer, state.framebuffer);

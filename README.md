@@ -70,19 +70,25 @@ texture. The data texture uses G for perceptual roughness and B for metallic; mi
 textures leave both factors unchanged. Textures are borrowed and must remain alive for
 the duration of the render call. Each texture gets its own mip LOD based on its size.
 
-`pbr::parse_material_buffer` accepts a small project-specific factor descriptor, not MTL
-or glTF. Blank lines and `#` comments are allowed; omitted fields use the `Material`
-defaults, and finite values are clamped to `[0,1]`:
+An opt-in single-draw material sidecar is loaded by setting
+`RASTER_PBR_MATERIAL=materials/pbr_demo.rmat` (path relative to the asset root).
+Texture paths inside the descriptor are relative to the descriptor directory.
+Base-color TGA is loaded as sRGB; metallic-roughness TGA remains linear data (G roughness,
+B metallic). The app uses that material for the full draw. OBJ `usemtl` groups and
+per-face material selection are not implemented.
+
+The project-specific `.rmat` format is not MTL or glTF. Blank lines and `#` comments are
+allowed; omitted factors use `Material` defaults, and finite factor values clamp to `[0,1]`:
 
 ```text
 base_color 0.8 0.4 0.2  # linear RGB factors
 metallic 0.5
 roughness 0.3
+base_color_texture ../textures/pbr_base.tga
+metallic_roughness_texture ../textures/pbr_mr.tga
 ```
 
-The caller supplies the descriptor contents and texture references; the application
-does not yet load these descriptors automatically. OBJ `usemtl`/groups are not mapped
-to render materials: per-face materials and full glTF import remain future work.
+Full glTF import and per-face OBJ materials remain future work.
 
 ## Roadmap
 

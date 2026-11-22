@@ -1,0 +1,6 @@
+# Project-owned single-draw metallic-roughness material.
+base_color 1.0 1.0 1.0
+metallic 0.0
+roughness 0.65
+base_color_texture ../textures/pbr_base.tga
+metallic_roughness_texture ../textures/pbr_mr.tga

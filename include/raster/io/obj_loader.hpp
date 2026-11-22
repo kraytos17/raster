@@ -27,6 +27,8 @@ namespace raster {
         UnsupportedFaceIndex,
         UnsupportedFormat,
         IndexOutOfBounds,
+        MalformedMaterial,
+        InvalidMaterialPath,
         EmptyMesh,
         AllocationFailed,
     };

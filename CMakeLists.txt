@@ -59,6 +59,7 @@ target_sources(raster_engine INTERFACE
         include/raster/math/mat.hpp
         include/raster/math/vec.hpp
         include/raster/io/obj_loader.hpp
+        include/raster/io/pbr_material_loader.hpp
         include/raster/io/tga_loader.hpp
         include/raster/memory/framebuffer.hpp
         include/raster/memory/grid_mesh.hpp
@@ -134,6 +135,7 @@ if(RASTER_BUILD_TESTS)
         tests/test_math.cpp
         tests/test_pbr.cpp
         tests/test_asset_loaders.cpp
+        tests/test_material_loader.cpp
         tests/test_rasterizer.cpp
         tests/test_scene.cpp
         tests/test_simd.cpp
