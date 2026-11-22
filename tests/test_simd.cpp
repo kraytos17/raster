@@ -208,7 +208,7 @@ namespace {
             std::array<float, 4> c2{};
             for (std::size_t lane = 0; lane < 4U; ++lane) {
                 // Byte-range blends incl. exact .5 boundaries and near ties.
-                const auto pick = [&rng, trial, lane]() {
+                const auto pick = [&rng, trial, lane] {
                     switch ((trial + lane) % 6U) {
                         case 0:
                             return 127.5F;
@@ -234,6 +234,21 @@ namespace {
                 const std::array<float, 4> channels{c0[lane], c1[lane], c2[lane], 255.0F};
                 REQUIRE(packed[lane] == raster::pack_channels(channels));
             }
+        }
+    }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE("streaming fill matches scalar fill exactly", "[simd][streamfill]") {
+        DeterministicRng rng{};
+        const std::array<std::size_t, 8> sizes{0U, 1U, 3U, 4U, 5U, 17U, 1000U, 100'000U};
+        for (const auto count : sizes) {
+            const auto value = rng.next();
+            // Offset by one element to force 4-byte-but-not-16-byte alignment.
+            std::vector<std::uint32_t> wide(count + 1U, 0xDEADBEEFU);
+            std::vector<std::uint32_t> reference(count + 1U, 0xDEADBEEFU);
+            raster::simd::stream_fill_u32(wide.data() + 1U, count, value);
+            std::ranges::fill(reference.begin() + 1, reference.end(), value);
+            REQUIRE(wide == reference);
         }
     }
 } // namespace

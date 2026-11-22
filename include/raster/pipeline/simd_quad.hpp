@@ -20,6 +20,7 @@
 #endif
 
 #if defined(RASTER_SIMD_BACKEND_X86_64)
+#include <cstddef>
 #include <cstring>
 #else
 #include <algorithm>
@@ -170,6 +171,22 @@ namespace raster::simd {
         );
     }
 
+    // Non-temporal 32-bit fill for write-once framebuffer planes: sequential
+    // movnti stores bypass the cache (no prior fetch) and combine into full
+    // lines in the store buffer, halving clear bandwidth. Any 4-byte alignment
+    // works; the fence drains before raster threads read the plane.
+    inline void stream_fill_u32(
+        std::uint32_t* out, std::size_t count, std::uint32_t value
+    ) noexcept {
+        const int pattern = static_cast<int>(value);
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+        auto* destination = reinterpret_cast<int*>(out);
+        for (std::size_t index = 0; index < count; ++index) {
+            _mm_stream_si32(destination + index, pattern);
+        }
+        _mm_sfence();
+    }
+
     // Four-lane pack of byte-range channel blends, matching pack_channels
     // exactly: round half up per channel, keep the low 8 bits, pack 0xFFRGB.
     inline void pack_channels4(
@@ -279,6 +296,14 @@ namespace raster::simd {
             };
             out[lane] =
                 0xFF000000U | pack(c0[lane]) | (pack(c1[lane]) << 8U) | (pack(c2[lane]) << 16U);
+        }
+    }
+
+    inline void stream_fill_u32(
+        std::uint32_t* out, std::size_t count, std::uint32_t value
+    ) noexcept {
+        for (std::size_t index = 0; index < count; ++index) {
+            out[index] = value;
         }
     }
 #endif

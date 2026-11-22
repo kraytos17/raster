@@ -639,7 +639,12 @@ namespace raster::render {
             return true;
         }
 
-        std::ranges::fill(framebuffer.color_storage, 0xFF101018U);
+        simd::stream_fill_u32(
+            framebuffer.color_storage.data(),
+            framebuffer.color_storage.size(),
+            0xFF101018U
+        );
+
         std::ranges::fill(framebuffer.depth_storage, 0.0F);
         const auto seconds = static_cast<float>(static_cast<double>(elapsed_ns) * 1e-9);
         const auto stress_phase = std::fmod(seconds * 0.5F, 2.0F);
