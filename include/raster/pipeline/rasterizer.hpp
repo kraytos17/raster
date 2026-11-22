@@ -567,8 +567,8 @@ namespace raster {
                         continue;
                     }
 
-                    float edge_values_1[8]{};
-                    float edge_values_2[8]{};
+                    std::array<float, 8> edge_values_1{};
+                    std::array<float, 8> edge_values_2{};
                     for (const auto corner : std::views::iota(std::size_t{0}, std::size_t{4})) {
                         edge_values_1[corner] = static_cast<float>(corner_edges[corner][1]);
                         edge_values_2[corner] = static_cast<float>(corner_edges[corner][2]);
@@ -576,16 +576,16 @@ namespace raster {
                         edge_values_2[corner + 4U] = static_cast<float>(corner_edges_b[corner][2]);
                     }
 
-                    float lane_l0[8]{};
-                    float lane_l1[8]{};
-                    float lane_l2[8]{};
+                    std::array<float, 8> lane_l0{};
+                    std::array<float, 8> lane_l1{};
+                    std::array<float, 8> lane_l2{};
                     simd::barycentric_weights8(
-                        edge_values_1,
-                        edge_values_2,
+                        edge_values_1.data(),
+                        edge_values_2.data(),
                         triangle.inv_area,
-                        lane_l0,
-                        lane_l1,
-                        lane_l2
+                        lane_l0.data(),
+                        lane_l1.data(),
+                        lane_l2.data()
                     );
 
                     std::array<std::array<float, 3>, 4> weights_a{};

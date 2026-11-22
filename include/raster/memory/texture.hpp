@@ -132,26 +132,28 @@ namespace raster {
             const auto& low_mip = levels_[low_level];
             const auto& high_mip = levels_[high_level];
 
-            float low_v00[3][4]{};
-            float low_v10[3][4]{};
-            float low_v01[3][4]{};
-            float low_v11[3][4]{};
-            float low_fx[4]{};
-            float low_fy[4]{};
-            float high_v00[3][4]{};
-            float high_v10[3][4]{};
-            float high_v01[3][4]{};
-            float high_v11[3][4]{};
-            float high_fx[4]{};
-            float high_fy[4]{};
+            std::array<std::array<float, 4>, 3> low_v00{};
+            std::array<std::array<float, 4>, 3> low_v10{};
+            std::array<std::array<float, 4>, 3> low_v01{};
+            std::array<std::array<float, 4>, 3> low_v11{};
+            std::array<float, 4> low_fx{};
+            std::array<float, 4> low_fy{};
+
+            std::array<std::array<float, 4>, 3> high_v00{};
+            std::array<std::array<float, 4>, 3> high_v10{};
+            std::array<std::array<float, 4>, 3> high_v01{};
+            std::array<std::array<float, 4>, 3> high_v11{};
+            std::array<float, 4> high_fx{};
+            std::array<float, 4> high_fy{};
             for (std::size_t lane = 0; lane < 4U; ++lane) {
-                std::uint32_t low_corners[4]{};
-                std::uint32_t high_corners[4]{};
+                std::array<std::uint32_t, 4> low_corners{};
+                std::array<std::uint32_t, 4> high_corners{};
+
                 gather_bilinear_corners(
                     low_mip,
                     u[lane],
                     v[lane],
-                    low_corners,
+                    low_corners.data(),
                     low_fx[lane],
                     low_fy[lane]
                 );
@@ -159,11 +161,10 @@ namespace raster {
                     high_mip,
                     u[lane],
                     v[lane],
-                    high_corners,
+                    high_corners.data(),
                     high_fx[lane],
                     high_fy[lane]
                 );
-
                 for (std::size_t channel = 0; channel < 3U; ++channel) {
                     const auto shift = static_cast<std::uint32_t>(channel * 8U);
                     low_v00[channel][lane] = static_cast<float>((low_corners[0] >> shift) & 0xFFU);
@@ -181,37 +182,37 @@ namespace raster {
                 }
             }
 
-            float low_blended[3][4]{};
-            float high_blended[3][4]{};
-            float mixed[3][4]{};
+            std::array<std::array<float, 4>, 3> low_blended{};
+            std::array<std::array<float, 4>, 3> high_blended{};
+            std::array<std::array<float, 4>, 3> mixed{};
             for (std::size_t channel = 0; channel < 3U; ++channel) {
                 simd::bilinear_blend4(
-                    low_v00[channel],
-                    low_v10[channel],
-                    low_v01[channel],
-                    low_v11[channel],
-                    low_fx,
-                    low_fy,
-                    low_blended[channel]
+                    low_v00[channel].data(),
+                    low_v10[channel].data(),
+                    low_v01[channel].data(),
+                    low_v11[channel].data(),
+                    low_fx.data(),
+                    low_fy.data(),
+                    low_blended[channel].data()
                 );
                 simd::bilinear_blend4(
-                    high_v00[channel],
-                    high_v10[channel],
-                    high_v01[channel],
-                    high_v11[channel],
-                    high_fx,
-                    high_fy,
-                    high_blended[channel]
+                    high_v00[channel].data(),
+                    high_v10[channel].data(),
+                    high_v01[channel].data(),
+                    high_v11[channel].data(),
+                    high_fx.data(),
+                    high_fy.data(),
+                    high_blended[channel].data()
                 );
                 simd::trilinear_mix4(
-                    low_blended[channel],
-                    high_blended[channel],
+                    low_blended[channel].data(),
+                    high_blended[channel].data(),
                     fraction,
-                    mixed[channel]
+                    mixed[channel].data()
                 );
             }
             // mixed[0/1/2] are B/G/R (channel c packs at bits c*8).
-            simd::pack_channels4(mixed[0], mixed[1], mixed[2], out);
+            simd::pack_channels4(mixed[0].data(), mixed[1].data(), mixed[2].data(), out);
         }
 
     private:
@@ -271,11 +272,11 @@ namespace raster {
             float u, float v, std::size_t mip_level
         ) const noexcept {
             const auto& mip = levels_[std::min(mip_level, levels_.size() - 1U)];
-            std::uint32_t corners[4]{};
+            std::array<std::uint32_t, 4> corners{};
             float fraction_x{};
             float fraction_y{};
 
-            gather_bilinear_corners(mip, u, v, corners, fraction_x, fraction_y);
+            gather_bilinear_corners(mip, u, v, corners.data(), fraction_x, fraction_y);
             const auto c00 = corners[0];
             const auto c10 = corners[1];
             const auto c01 = corners[2];
@@ -319,7 +320,7 @@ namespace raster {
                 };
                 for (std::size_t y = 0; y < next_height; ++y) {
                     for (std::size_t x = 0; x < next_width; ++x) {
-                        std::uint32_t sums[4]{};
+                        std::array<std::uint32_t, 4> sums{};
                         std::size_t sample_count = 0;
                         for (std::size_t dy = 0; dy < 2U; ++dy) {
                             for (std::size_t dx = 0; dx < 2U; ++dx) {
