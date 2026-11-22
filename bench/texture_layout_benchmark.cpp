@@ -10,6 +10,7 @@
 #include <random>
 #include <ranges>
 #include <SDL3/SDL.h>
+#include <span>
 #include <stdexcept>
 #include <string_view>
 #include <vector>
@@ -78,8 +79,8 @@ namespace {
     template <typename Mapping> [[nodiscard]]
     std::uint64_t run_pass(
         const Mapping& mapping,
-        const std::vector<QuadOrigin>& order,
-        const volatile std::uint32_t* texels,
+        std::span<const QuadOrigin> order,
+        std::span<const volatile std::uint32_t> texels,
         std::uint64_t& checksum
     ) noexcept {
         const auto start = SDL_GetTicksNS();
@@ -96,7 +97,7 @@ namespace {
 
     template <typename Mapping> [[nodiscard]]
     double benchmark_layout(
-        const char* name, const Mapping& mapping, const std::vector<QuadOrigin>& order
+        const char* name, const Mapping& mapping, std::span<const QuadOrigin> order
     ) {
         std::vector<std::uint32_t> storage(mapping.required_span_size());
         for (std::size_t y = 0; y < texture_height; ++y) {
@@ -106,7 +107,7 @@ namespace {
         }
 
         std::uint64_t checksum = 0;
-        const volatile std::uint32_t* const texels = storage.data();
+        const std::span<const volatile std::uint32_t> texels{storage.data(), storage.size()};
         for ([[maybe_unused]]
              const auto pass : std::views::iota(std::size_t{0}, warmup_passes)) {
             static_cast<void>(run_pass(mapping, order, texels, checksum));

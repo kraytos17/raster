@@ -236,7 +236,11 @@ namespace {
 
         std::vector<std::uint32_t> serial(width * height, 0U);
         std::vector<std::uint32_t> tiled(width * height, 0U);
-        const auto record = [&](std::vector<std::uint32_t>& counts,
+        const auto serial_view =
+            std::mdspan<std::uint32_t, raster::Extents2D>{serial.data(), height, width};
+        const auto tiled_view =
+            std::mdspan<std::uint32_t, raster::Extents2D>{tiled.data(), height, width};
+        const auto record = [&](std::mdspan<std::uint32_t, raster::Extents2D> counts,
                                 std::size_t x,
                                 std::size_t y,
                                 const raster::QuadBarycentrics& quad) noexcept {
@@ -244,7 +248,7 @@ namespace {
                 if ((quad.visible_mask & (1U << lane)) != 0U) {
                     const auto px = x + (lane & 1U);
                     const auto py = y + (lane >> 1U);
-                    ++counts[py * width + px];
+                    ++counts[py, px];
                 }
             }
         };
@@ -253,7 +257,7 @@ namespace {
             width,
             height,
             [&](std::size_t x, std::size_t y, const raster::QuadBarycentrics& quad) noexcept {
-            record(serial, x, y, quad);
+            record(serial_view, x, y, quad);
         }
         );
         for (std::size_t tile_y = 0U; tile_y * raster::raster_tile_size < height; ++tile_y) {
@@ -272,7 +276,7 @@ namespace {
                     [&](std::size_t x,
                         std::size_t y,
                         const raster::QuadBarycentrics& quad) noexcept {
-                    record(tiled, x, y, quad);
+                    record(tiled_view, x, y, quad);
                 },
                     region
                 );
@@ -534,21 +538,23 @@ namespace {
             std::vector<std::uint32_t> owner;
             bool barycentrics_valid = true;
             std::size_t covered_pixels = 0;
+            std::mdspan<std::uint32_t, raster::Extents2D> counts_view;
+            std::mdspan<std::uint32_t, raster::Extents2D> owner_view;
 
             explicit CoverageCounters(std::size_t width, std::size_t height) :
                 counts(width * height, 0),
-                owner(width * height, 0) {}
+                owner(width * height, 0),
+                counts_view{counts.data(), height, width},
+                owner_view{owner.data(), height, width} {}
 
             void record(
                 std::size_t x,
                 std::size_t y,
-                std::size_t width,
                 std::uint32_t triangle_id,
                 const raster::PixelBarycentrics& barycentrics
             ) noexcept {
-                const auto index = y * width + x;
-                ++counts[index];
-                owner[index] = triangle_id;
+                ++counts_view[y, x];
+                owner_view[y, x] = triangle_id;
                 if (barycentrics.l0 < 0.0F || barycentrics.l1 < 0.0F || barycentrics.l2 < 0.0F) {
                     barycentrics_valid = false;
                 }
@@ -597,7 +603,7 @@ namespace {
                 const auto fragment = [&](std::size_t x,
                                           std::size_t y,
                                           const raster::PixelBarycentrics& barycentrics) noexcept {
-                    counters.record(x, y, size, 1, barycentrics);
+                    counters.record(x, y, 1U, barycentrics);
                 };
                 raster::rasterize_triangle(*upper, size, size, fragment);
                 raster::rasterize_triangle(*lower, size, size, fragment);
@@ -607,12 +613,14 @@ namespace {
         REQUIRE(counters.barycentrics_valid);
         std::size_t mismatched = 0;
         std::size_t first_mismatch = 0;
-        for (const auto index : std::views::iota(std::size_t{0}, counters.counts.size())) {
-            if (counters.counts[index] != 1) {
-                if (mismatched == 0) {
-                    first_mismatch = index;
+        for (std::size_t y = 0; y < size; ++y) {
+            for (std::size_t x = 0; x < size; ++x) {
+                if (counters.counts_view[y, x] != 1U) {
+                    if (mismatched == 0) {
+                        first_mismatch = y * size + x;
+                    }
+                    ++mismatched;
                 }
-                ++mismatched;
             }
         }
         REQUIRE(counters.covered_pixels == size * size);
@@ -647,7 +655,7 @@ namespace {
             size,
             size,
             [&](std::size_t x, std::size_t y, const raster::PixelBarycentrics& bary) noexcept {
-            counters.record(x, y, size, 1, bary);
+            counters.record(x, y, 1U, bary);
         }
         );
         raster::rasterize_triangle(
@@ -655,20 +663,22 @@ namespace {
             size,
             size,
             [&](std::size_t x, std::size_t y, const raster::PixelBarycentrics& bary) noexcept {
-            counters.record(x, y, size, 2, bary);
+            counters.record(x, y, 2U, bary);
         }
         );
 
         REQUIRE(counters.barycentrics_valid);
-        for (const auto index : std::views::iota(std::size_t{0}, counters.counts.size())) {
-            REQUIRE(counters.counts[index] <= 1);
+        for (std::size_t y = 0; y < size; ++y) {
+            for (std::size_t x = 0; x < size; ++x) {
+                REQUIRE(counters.counts_view[y, x] <= 1U);
+            }
         }
         for (const auto y : std::views::iota(std::size_t{0}, std::size_t{4})) {
-            REQUIRE(counters.counts[y * size + 0] == 1);
-            REQUIRE(counters.owner[y * size + 0] == 1);
+            REQUIRE(counters.counts_view[y, 0U] == 1U);
+            REQUIRE(counters.owner_view[y, 0U] == 1U);
         }
         for (const auto y : std::views::iota(std::size_t{4}, size)) {
-            REQUIRE(counters.counts[y * size + 0] == 0);
+            REQUIRE(counters.counts_view[y, 0U] == 0U);
         }
     }
 
@@ -698,7 +708,7 @@ namespace {
             size,
             size,
             [&](std::size_t x, std::size_t y, const raster::PixelBarycentrics& bary) noexcept {
-            counters.record(x, y, size, 1, bary);
+            counters.record(x, y, 1U, bary);
         }
         );
         raster::rasterize_triangle(
@@ -706,17 +716,19 @@ namespace {
             size,
             size,
             [&](std::size_t x, std::size_t y, const raster::PixelBarycentrics& bary) noexcept {
-            counters.record(x, y, size, 2, bary);
+            counters.record(x, y, 2U, bary);
         }
         );
 
         REQUIRE(counters.barycentrics_valid);
-        for (const auto index : std::views::iota(std::size_t{0}, counters.counts.size())) {
-            REQUIRE(counters.counts[index] <= 1);
+        for (std::size_t y = 0; y < size; ++y) {
+            for (std::size_t x = 0; x < size; ++x) {
+                REQUIRE(counters.counts_view[y, x] <= 1U);
+            }
         }
         for (const auto x : std::views::iota(std::size_t{0}, std::size_t{4})) {
-            REQUIRE(counters.counts[x] == 1);
-            REQUIRE(counters.owner[x] == 1);
+            REQUIRE(counters.counts_view[0U, x] == 1U);
+            REQUIRE(counters.owner_view[0U, x] == 1U);
         }
     }
 
@@ -739,22 +751,21 @@ namespace {
             size,
             size,
             [&](std::size_t x, std::size_t y, const raster::PixelBarycentrics& bary) noexcept {
-            counters.record(x, y, size, 1, bary);
+            counters.record(x, y, 1U, bary);
         }
         );
 
         REQUIRE(counters.barycentrics_valid);
         for (const auto y : std::views::iota(std::size_t{0}, size)) {
-            const auto row_begin = static_cast<std::size_t>(y * size);
             const std::uint32_t expected = y >= 100 ? 1U : 0U;
-            const auto row_total = counters.counts[row_begin]
-                + counters.counts[row_begin + 127]
-                + counters.counts[row_begin + 255];
+            const auto row_total = counters.counts_view[y, 0U]
+                + counters.counts_view[y, 127U]
+                + counters.counts_view[y, 255U];
             INFO("row " << y << " sampled total " << row_total << " expected " << expected * 3U);
             REQUIRE(row_total == expected * 3U);
         }
-        REQUIRE(counters.counts[100 * size + 0] == 1);
-        REQUIRE(counters.counts[255 * size + 255] == 1);
+        REQUIRE(counters.counts_view[100U, 0U] == 1U);
+        REQUIRE(counters.counts_view[255U, 255U] == 1U);
     }
 
     // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
@@ -779,7 +790,7 @@ namespace {
             size,
             size,
             [&](std::size_t x, std::size_t y, const raster::PixelBarycentrics& bary) noexcept {
-            counters.record(x, y, size, 1, bary);
+            counters.record(x, y, 1U, bary);
             weights_identical =
                 weights_identical && bary.a0 == bary.l0 && bary.a1 == bary.l1 && bary.a2 == bary.l2;
         }
@@ -813,7 +824,7 @@ namespace {
             size,
             size,
             [&](std::size_t x, std::size_t y, const raster::PixelBarycentrics& bary) noexcept {
-            counters.record(x, y, size, 1, bary);
+            counters.record(x, y, 1U, bary);
             const float w_recip = bary.l0 * 1.0F + bary.l1 * 0.5F + bary.l2 * 2.0F;
             const auto independent_a0 = (bary.l0 * 1.0F) / w_recip;
             const auto independent_a1 = (bary.l1 * 0.5F) / w_recip;

@@ -652,7 +652,7 @@ namespace raster::render {
                 if (!clipped) {
                     return false;
                 }
-                for (const auto& triangle : std::span{clipped->triangles}.first(clipped->size)) {
+                for (const auto& triangle : clipped->active_triangles()) {
                     draw_mesh_triangle(
                         framebuffer,
                         shader,
@@ -709,8 +709,7 @@ namespace raster::render {
                 if (!clipped) {
                     return false;
                 }
-                for (const auto& clipped_triangle :
-                     std::span{clipped->triangles}.first(clipped->size)) {
+                for (const auto& clipped_triangle : clipped->active_triangles()) {
                     const std::array<typename FloorShader<Layout>::Varyings, 3> vertices{
                         clipped_triangle.vertices[0],
                         clipped_triangle.vertices[1],

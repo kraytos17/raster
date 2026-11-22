@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <expected>
 #include <limits>
+#include <span>
 
 #include "raster/math/vec.hpp"
 #include "raster/pipeline/shader.hpp"
@@ -51,6 +52,16 @@ namespace raster {
         constexpr T& operator[](std::size_t index) noexcept {
             return vertices[index];
         }
+
+        [[nodiscard]]
+        constexpr std::span<const T> active_vertices() const noexcept {
+            return {vertices.data(), size};
+        }
+
+        [[nodiscard]]
+        constexpr std::span<T> active_vertices() noexcept {
+            return {vertices.data(), size};
+        }
     };
 
     template <typename VaryingsT> struct ClippedTriangle {
@@ -60,6 +71,16 @@ namespace raster {
     template <typename VaryingsT> struct ClippedTriangleFan {
         std::array<ClippedTriangle<VaryingsT>, clipped_triangle_capacity> triangles{};
         std::size_t size{};
+
+        [[nodiscard]]
+        constexpr std::span<const ClippedTriangle<VaryingsT>> active_triangles() const noexcept {
+            return {triangles.data(), size};
+        }
+
+        [[nodiscard]]
+        constexpr std::span<ClippedTriangle<VaryingsT>> active_triangles() noexcept {
+            return {triangles.data(), size};
+        }
     };
 
     namespace detail {
@@ -222,12 +243,14 @@ namespace raster {
                 break;
             }
 
-            const VaryingsT* previous = &input.vertices[input.size - 1];
+            const auto input_vertices = input.active_vertices();
+            const VaryingsT* previous = &input_vertices.back();
             float previous_distance =
                 detail::clip_plane_distance(previous->clip_pos, plane, guard_band);
+
             bool previous_inside = previous_distance >= 0.0F;
             for (std::size_t vertex_index = 0; vertex_index < input.size; ++vertex_index) {
-                const VaryingsT& current = input.vertices[vertex_index];
+                const VaryingsT& current = input_vertices[vertex_index];
                 const float current_distance =
                     detail::clip_plane_distance(current.clip_pos, plane, guard_band);
                 const bool current_inside = current_distance >= 0.0F;
@@ -260,8 +283,8 @@ namespace raster {
         }
         // The six canonical inequalities force positive w for any nonzero
         // surviving point. Check explicitly before downstream inv_w = 1/w.
-        for (std::size_t vertex_index = 0; vertex_index < input.size; ++vertex_index) {
-            const auto& point = input.vertices[vertex_index].clip_pos;
+        for (auto& vertex : input.active_vertices()) {
+            const auto& point = vertex.clip_pos;
             if (!detail::finite(point) || point.w <= 0.0F) {
                 return std::unexpected{ClipError::InvalidSurvivorW};
             }
@@ -280,7 +303,7 @@ namespace raster {
                 || !detail::snap_roundoff_to_interval(canonical_point.z, 0.0F, point.w)) {
                 return std::unexpected{ClipError::InvalidSurvivorW};
             }
-            input.vertices[vertex_index].clip_pos = canonical_point;
+            vertex.clip_pos = canonical_point;
         }
         if (input.size < 3) {
             return fan;
@@ -288,11 +311,13 @@ namespace raster {
         if (input.size - 2 > fan.triangles.size()) {
             return std::unexpected{ClipError::PolygonCapacityExceeded};
         }
-        for (std::size_t index = 1; index + 1 < input.size; ++index) {
+
+        const auto iv = input.active_vertices();
+        for (std::size_t index = 1; index + 1 < iv.size(); ++index) {
             fan.triangles[fan.size++].vertices = {
-                input.vertices[0],
-                input.vertices[index],
-                input.vertices[index + 1],
+                iv[0],
+                iv[index],
+                iv[index + 1],
             };
         }
         return fan;

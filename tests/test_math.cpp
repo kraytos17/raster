@@ -435,12 +435,12 @@ namespace {
         REQUIRE(std::fabs(sampled_v - expected_v) <= 1e-6F);
         REQUIRE(std::fabs(sampled_u - affine_u) > 1e-2F);
         REQUIRE(std::fabs(sampled_v - affine_v) > 1e-2F);
-        const auto sample_color = colors[target_y * width + target_x];
+        const auto sample_color = color_view[target_y, target_x];
         const bool sample_is_checker_color =
             sample_color == 0xFFCCCCCCU || sample_color == 0xFF555555U;
         REQUIRE(sample_is_checker_color);
-        REQUIRE(depths[target_y * width + target_x] > 0.0F);
-        REQUIRE(depths[target_y * width + target_x] <= 1.0F);
+        REQUIRE(depth_view[target_y, target_x] > 0.0F);
+        REQUIRE(depth_view[target_y, target_x] <= 1.0F);
     }
 } // namespace
 

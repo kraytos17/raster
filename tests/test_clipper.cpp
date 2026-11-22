@@ -90,6 +90,7 @@ namespace {
         const auto clipped = raster::clip_triangle(shader, a, b, c);
         REQUIRE(clipped.has_value());
         REQUIRE(clipped->size == 1);
+        REQUIRE(clipped->active_triangles().size() == 1U);
         REQUIRE(clipped->triangles[0].vertices[0].clip_pos.x == a.clip_pos.x);
         REQUIRE(clipped->triangles[0].vertices[1].uv.x == b.uv.x);
         REQUIRE(clipped->triangles[0].vertices[2].color.z == c.color.z);
@@ -157,9 +158,10 @@ namespace {
         const auto clipped = raster::clip_triangle(shader, outside, inside_a, inside_b);
         REQUIRE(clipped.has_value());
         REQUIRE(clipped->size == 2); // triangle clips to a quad => fan of two triangles
-        for (const auto triangle_index : std::views::iota(std::size_t{0}, clipped->size)) {
+        REQUIRE(clipped->active_triangles().size() == 2U);
+        for (const auto& triangle : clipped->active_triangles()) {
             for (const auto vertex_index : std::views::iota(std::size_t{0}, std::size_t{3})) {
-                const auto& vertex = clipped->triangles[triangle_index].vertices[vertex_index];
+                const auto& vertex = triangle.vertices[vertex_index];
                 REQUIRE(inside_all_planes(vertex.clip_pos));
                 REQUIRE(vertex.clip_pos.w > 0.0F);
             }
@@ -168,9 +170,9 @@ namespace {
         // Both outside->inside crossings hit x=-w at t=0.5; custom varyings
         // must use that same homogeneous edge parameter.
         bool found_expected_intersection = false;
-        for (const auto triangle_index : std::views::iota(std::size_t{0}, clipped->size)) {
+        for (const auto& triangle : clipped->active_triangles()) {
             for (const auto vertex_index : std::views::iota(std::size_t{0}, std::size_t{3})) {
-                const auto& vertex = clipped->triangles[triangle_index].vertices[vertex_index];
+                const auto& vertex = triangle.vertices[vertex_index];
                 if (std::fabs(vertex.clip_pos.x + vertex.clip_pos.w)
                     < 1e-6F
                     && std::fabs(vertex.uv.x - 1.0F)
@@ -246,12 +248,12 @@ namespace {
             const auto clipped = raster::clip_triangle(shader, outside, inside_a, inside_b);
             REQUIRE(clipped.has_value());
             REQUIRE(clipped->size == 2);
+            REQUIRE(clipped->active_triangles().size() == 2U);
 
             bool found_expected = false;
-            for (const auto triangle_index : std::views::iota(std::size_t{0}, clipped->size)) {
+            for (const auto& triangle : clipped->active_triangles()) {
                 for (const auto vertex_index : std::views::iota(std::size_t{0}, std::size_t{3})) {
-                    const auto& point =
-                        clipped->triangles[triangle_index].vertices[vertex_index].clip_pos;
+                    const auto& point = triangle.vertices[vertex_index].clip_pos;
                     REQUIRE(inside_all_planes(point));
                     REQUIRE(point.w > 0.0F);
                     if (std::fabs(point.x - crossing.expected_boundary.x)
@@ -292,9 +294,10 @@ namespace {
         const auto clipped = raster::clip_triangle(shader, behind, visible_a, visible_b);
         REQUIRE(clipped.has_value());
         REQUIRE(clipped->size >= 1);
-        for (const auto triangle_index : std::views::iota(std::size_t{0}, clipped->size)) {
+        REQUIRE(clipped->active_triangles().size() == clipped->size);
+        for (const auto& triangle : clipped->active_triangles()) {
             for (const auto vertex_index : std::views::iota(std::size_t{0}, std::size_t{3})) {
-                const auto& vertex = clipped->triangles[triangle_index].vertices[vertex_index];
+                const auto& vertex = triangle.vertices[vertex_index];
                 REQUIRE(inside_all_planes(vertex.clip_pos));
                 REQUIRE(vertex.clip_pos.w > 0.0F);
             }

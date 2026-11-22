@@ -776,6 +776,8 @@ namespace {
         auto color_view =
             std::mdspan<std::uint32_t, raster::Extents2D>{colors.data(), height, width};
         auto depth_view = std::mdspan<float, raster::Extents2D>{depths.data(), height, width};
+        auto coverage_view =
+            std::mdspan<std::uint8_t, raster::Extents2D>{coverage.data(), height, width};
 
         const auto position = [](std::size_t x_index, std::size_t z_index) noexcept {
             const auto x_fraction = static_cast<float>(x_index) / static_cast<float>(x_cells);
@@ -809,8 +811,7 @@ namespace {
                     const auto clipped =
                         raster::clip_triangle(shader, source[0], source[1], source[2]);
                     REQUIRE(clipped.has_value());
-                    for (const auto& clipped_triangle :
-                         std::span{clipped->triangles.data(), clipped->size}) {
+                    for (const auto& clipped_triangle : clipped->active_triangles()) {
                         std::array<raster::ScreenPoint, 3> screen{};
                         std::array<float, 3> inverse_w{};
                         std::array<float, 3> reverse_z{};
@@ -848,8 +849,7 @@ namespace {
                             [&](std::size_t x,
                                 std::size_t y,
                                 const raster::PixelBarycentrics& barycentrics) noexcept {
-                            const auto pixel_index = y * width + x;
-                            ++coverage[pixel_index];
+                            ++coverage_view[y, x];
                             const auto attributes = shader.interpolate(
                                 clipped_triangle.vertices[0],
                                 clipped_triangle.vertices[1],
@@ -876,21 +876,23 @@ namespace {
         std::size_t dark_checker_pixels = 0;
         float minimum_depth = 1.0F;
         float maximum_depth = 0.0F;
-        for (const auto index : std::views::iota(std::size_t{0}, width * height)) {
-            REQUIRE(coverage[index] <= 1U); // no shared-edge double writes / z-fighting
-            if (coverage[index] == 0U) {
-                REQUIRE(depths[index] == 0.0F);
-                continue;
-            }
+        for (std::size_t y = 0U; y < height; ++y) {
+            for (std::size_t x = 0U; x < width; ++x) {
+                REQUIRE(coverage_view[y, x] <= 1U); // no shared-edge double writes / z-fighting
+                if (coverage_view[y, x] == 0U) {
+                    REQUIRE(depth_view[y, x] == 0.0F);
+                    continue;
+                }
 
-            ++covered_pixels;
-            REQUIRE(std::isfinite(depths[index]));
-            REQUIRE(depths[index] >= 0.0F);
-            REQUIRE(depths[index] <= 1.0F);
-            minimum_depth = std::min(minimum_depth, depths[index]);
-            maximum_depth = std::max(maximum_depth, depths[index]);
-            light_checker_pixels += colors[index] == 0xFFCCCCCCU ? 1U : 0U;
-            dark_checker_pixels += colors[index] == 0xFF555555U ? 1U : 0U;
+                ++covered_pixels;
+                REQUIRE(std::isfinite(depth_view[y, x]));
+                REQUIRE(depth_view[y, x] >= 0.0F);
+                REQUIRE(depth_view[y, x] <= 1.0F);
+                minimum_depth = std::min(minimum_depth, depth_view[y, x]);
+                maximum_depth = std::max(maximum_depth, depth_view[y, x]);
+                light_checker_pixels += color_view[y, x] == 0xFFCCCCCCU ? 1U : 0U;
+                dark_checker_pixels += color_view[y, x] == 0xFF555555U ? 1U : 0U;
+            }
         }
 
         REQUIRE(covered_pixels > width * height / 5U);
@@ -973,8 +975,7 @@ namespace {
             if (clipped->size > guard_clipped->size) {
                 guard_band_saved_triangles += clipped->size - guard_clipped->size;
             }
-            for (const auto& guard_triangle :
-                 std::span{guard_clipped->triangles.data(), guard_clipped->size}) {
+            for (const auto& guard_triangle : guard_clipped->active_triangles()) {
                 for (const auto& guard_vertex : guard_triangle.vertices) {
                     REQUIRE(guard_vertex.clip_pos.w > 0.0F);
                     const auto ndc_x = guard_vertex.clip_pos.x / guard_vertex.clip_pos.w;
@@ -986,7 +987,7 @@ namespace {
                     );
                 }
             }
-            for (const auto& triangle : std::span{clipped->triangles.data(), clipped->size}) {
+            for (const auto& triangle : clipped->active_triangles()) {
                 ++clipped_output_triangles;
                 std::array<raster::ScreenPoint, 3> screen{};
                 std::array<float, 3> inverse_w{};
@@ -1084,9 +1085,9 @@ namespace {
 
         const raster::Texture2D<raster::LayoutTiled4x4> checker{checker_image};
         std::vector<float> depth_storage(width * height, 0.0F);
-        depth_storage[3U * width + 4U] = 1.0F; // occlude one covered lane at the silhouette
         auto depth_view =
             std::mdspan<float, raster::Extents2D>{depth_storage.data(), height, width};
+        depth_view[3U, 4U] = 1.0F; // occlude one covered lane at the silhouette
 
         bool saw_partial_quad = false;
         bool saw_partially_occluded_quad = false;
@@ -1096,6 +1097,8 @@ namespace {
         std::size_t bright_pixels = 0;
         std::size_t dark_pixels = 0;
         std::vector<std::uint32_t> rendered_pixels(width * height, 0U);
+        auto rendered_view =
+            std::mdspan<std::uint32_t, raster::Extents2D>{rendered_pixels.data(), height, width};
         raster::rasterize_triangle_quads(
             *triangle,
             width,
@@ -1151,7 +1154,7 @@ namespace {
                 REQUIRE(filtered == reference);
                 const auto x = quad_x + (lane & 1U);
                 const auto y = quad_y + (lane >> 1U);
-                rendered_pixels[y * width + x] = filtered;
+                rendered_view[y, x] = filtered;
                 bright_pixels += filtered == 0xFFFFFFFFU ? 1U : 0U;
                 dark_pixels += filtered == 0xFF000000U ? 1U : 0U;
                 ++tested_visible_lanes;
@@ -1166,10 +1169,13 @@ namespace {
         REQUIRE(std::fabs(minimum_partial_lod - 3.0F) < 0.1F);
         REQUIRE(bright_pixels > 0U);
         REQUIRE(dark_pixels > 0U);
-        for (const auto pixel : rendered_pixels) {
-            const bool is_valid_output =
-                pixel == 0U || pixel == 0xFFFFFFFFU || pixel == 0xFF000000U;
-            REQUIRE(is_valid_output);
+        for (std::size_t y = 0U; y < height; ++y) {
+            for (std::size_t x = 0U; x < width; ++x) {
+                const auto pixel = rendered_view[y, x];
+                const bool is_valid_output =
+                    pixel == 0U || pixel == 0xFFFFFFFFU || pixel == 0xFF000000U;
+                REQUIRE(is_valid_output);
+            }
         }
     }
 
