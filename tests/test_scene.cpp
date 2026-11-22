@@ -10,6 +10,7 @@
 #include <numbers>
 #include <optional>
 #include <ranges>
+#include <SDL3/SDL.h>
 #include <span>
 #include <tuple>
 #include <vector>
@@ -22,6 +23,7 @@
 #include "raster/memory/texture.hpp"
 #include "raster/memory/texture_layout.hpp"
 #include "raster/pipeline/clipper.hpp"
+#include "raster/pipeline/pbr.hpp"
 #include "raster/pipeline/rasterizer.hpp"
 #include "raster/pipeline/shader.hpp"
 #include "raster/platform/allocation_probe.hpp"
@@ -33,6 +35,9 @@
 #endif
 
 namespace {
+    raster::SoAMesh make_two_sided_triangle(raster::Vec3f normal);
+    raster::SoAMesh make_shadow_scene();
+
     // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
     TEST_CASE("tiled scene renderer matches serial color and depth", "[scene][tile]") {
         constexpr std::size_t width = 96U;
@@ -61,7 +66,6 @@ namespace {
         raster::Framebuffer serial{width, height};
         raster::Framebuffer tiled{width, height};
         raster::render::TileRenderer renderer{4U};
-
         REQUIRE(
             renderer.render_scene(tiled, *mesh, 0U, false, true, false, false, texture, camera)
         );
@@ -83,6 +87,237 @@ namespace {
         REQUIRE(tiled.color_storage == serial.color_storage);
         REQUIRE(tiled.depth_storage == serial.depth_storage);
         REQUIRE(allocation_count == 0U);
+    }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE(
+        "PBR scene mode is selectable, deterministic, and material-sensitive", "[scene][pbr]"
+    ) {
+        constexpr std::size_t width = 96U;
+        constexpr std::size_t height = 80U;
+        const auto mesh = raster::load_obj(
+            std::filesystem::path{RASTER_ASSET_DIR} / "models/clipping_sphere.obj"
+        );
+        REQUIRE(mesh.has_value());
+
+        raster::TgaImage image{};
+        image.width = 1U;
+        image.height = 1U;
+        image.pixels = {0xFFB08050U};
+        const raster::Texture2D<raster::LayoutTiled4x4> texture{
+            image,
+            raster::TextureColorSpace::Srgb
+        };
+        const raster::render::FreeLookCamera camera{
+            .position = raster::Vec3f{.x = 0.1F, .y = -0.2F, .z = 3.5F},
+            .yaw = 0.07F,
+            .pitch = 0.03F,
+        };
+        const raster::pbr::Material dielectric{
+            .base_color = raster::Vec3f{.x = 1.0F, .y = 1.0F, .z = 1.0F},
+            .metallic = 0.0F,
+            .perceptual_roughness = 0.55F,
+        };
+        const raster::pbr::Material copper{
+            .base_color = raster::Vec3f{.x = 0.95F, .y = 0.48F, .z = 0.22F},
+            .metallic = 1.0F,
+            .perceptual_roughness = 0.3F,
+        };
+
+        raster::Framebuffer diffuse{width, height};
+        raster::Framebuffer serial{width, height};
+        raster::Framebuffer tiled{width, height};
+        raster::render::TileRenderer renderer{4U};
+        const auto render_pbr = [&](raster::Framebuffer& target,
+                                    const raster::pbr::Material& material) noexcept {
+            return raster::render::render_scene(
+                target,
+                *mesh,
+                0U,
+                false,
+                true,
+                false,
+                false,
+                texture,
+                camera,
+                raster::render::SceneShading::Pbr,
+                material
+            );
+        };
+        REQUIRE(
+            raster::render::
+                render_scene(diffuse, *mesh, 0U, false, true, false, false, texture, camera)
+        );
+        REQUIRE(render_pbr(serial, dielectric));
+        REQUIRE(renderer.render_scene(
+            tiled,
+            *mesh,
+            0U,
+            false,
+            true,
+            false,
+            false,
+            texture,
+            camera,
+            raster::render::SceneShading::Pbr,
+            dielectric
+        ));
+        REQUIRE(tiled.color_storage == serial.color_storage);
+        REQUIRE(tiled.depth_storage == serial.depth_storage);
+        REQUIRE(serial.color_storage != diffuse.color_storage);
+        std::size_t pbr_allocations = 0U;
+        bool pbr_rendered_after_warmup = false;
+        {
+            const raster::platform::ScopedAllocationProbe probe{true};
+            pbr_rendered_after_warmup = renderer.render_scene(
+                tiled,
+                *mesh,
+                0U,
+                false,
+                true,
+                false,
+                false,
+                texture,
+                camera,
+                raster::render::SceneShading::Pbr,
+                dielectric
+            );
+            pbr_allocations = probe.allocations();
+        }
+        REQUIRE(pbr_rendered_after_warmup);
+        REQUIRE(tiled.color_storage == serial.color_storage);
+        REQUIRE(pbr_allocations == 0U);
+
+        REQUIRE(render_pbr(serial, copper));
+        REQUIRE(serial.color_storage != diffuse.color_storage);
+        REQUIRE(renderer.render_scene(
+            tiled,
+            *mesh,
+            0U,
+            false,
+            true,
+            false,
+            false,
+            texture,
+            camera,
+            raster::render::SceneShading::Pbr,
+            copper
+        ));
+        REQUIRE(tiled.color_storage == serial.color_storage);
+
+        raster::Texture2D<raster::LayoutTiled4x4> encoded_texture{image};
+        REQUIRE_FALSE(
+            raster::render::render_scene(
+                tiled,
+                *mesh,
+                0U,
+                false,
+                true,
+                false,
+                false,
+                encoded_texture,
+                camera,
+                raster::render::SceneShading::Pbr,
+                copper
+            )
+        );
+    }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE("PBR preserves fill under shadows and sRGB-encodes output", "[scene][pbr]") {
+        raster::TgaImage image{};
+        image.width = 1U;
+        image.height = 1U;
+        image.pixels = {0xFF808080U};
+        const raster::Texture2D<raster::LayoutTiled4x4> texture{
+            image,
+            raster::TextureColorSpace::Srgb
+        };
+        constexpr std::size_t width = 64U;
+        constexpr std::size_t height = 64U;
+        const raster::render::FreeLookCamera camera{
+            .position = raster::Vec3f{.x = 0.0F, .y = 3.0F, .z = 4.0F},
+            .yaw = 0.0F,
+            .pitch = -std::atan2(3.0F, 4.0F),
+        };
+        const raster::pbr::Material white_dielectric{
+            .base_color = raster::Vec3f{.x = 1.0F, .y = 1.0F, .z = 1.0F},
+            .metallic = 0.0F,
+            .perceptual_roughness = 1.0F,
+        };
+        const auto face_on =
+            make_two_sided_triangle(raster::Vec3f{.x = 0.0F, .y = 0.6F, .z = 0.8F});
+        raster::Framebuffer face_frame{width, height};
+        REQUIRE(SDL_SetEnvironmentVariable(SDL_GetEnvironment(), "RASTER_NO_SHADOW", "1", true));
+        REQUIRE(
+            raster::render::render_scene(
+                face_frame,
+                face_on,
+                0U,
+                false,
+                true,
+                false,
+                false,
+                texture,
+                camera,
+                raster::render::SceneShading::Pbr,
+                white_dielectric
+            )
+        );
+        REQUIRE(SDL_UnsetEnvironmentVariable(SDL_GetEnvironment(), "RASTER_NO_SHADOW"));
+        const auto face_color = std::as_const(face_frame).color_view();
+        REQUIRE(face_color[height / 2U, width / 2U] == 0xFF646464U);
+
+        const auto shadow_scene = make_shadow_scene();
+        raster::Framebuffer with_shadows{width, height};
+        raster::Framebuffer without_shadows{width, height};
+        REQUIRE(
+            raster::render::render_scene(
+                with_shadows,
+                shadow_scene,
+                0U,
+                false,
+                true,
+                false,
+                false,
+                texture,
+                camera,
+                raster::render::SceneShading::Pbr,
+                white_dielectric
+            )
+        );
+        REQUIRE(SDL_SetEnvironmentVariable(SDL_GetEnvironment(), "RASTER_NO_SHADOW", "1", true));
+        const bool rendered_without_shadows = raster::render::render_scene(
+            without_shadows,
+            shadow_scene,
+            0U,
+            false,
+            true,
+            false,
+            false,
+            texture,
+            camera,
+            raster::render::SceneShading::Pbr,
+            white_dielectric
+        );
+        REQUIRE(SDL_UnsetEnvironmentVariable(SDL_GetEnvironment(), "RASTER_NO_SHADOW"));
+        REQUIRE(rendered_without_shadows);
+        const auto colors_with_shadows = std::as_const(with_shadows).color_view();
+        const auto colors_without_shadows = std::as_const(without_shadows).color_view();
+        const auto depth = std::as_const(with_shadows).depth_view();
+        std::size_t changed_shadow_pixels = 0U;
+        for (std::size_t y = 0U; y < height; ++y) {
+            for (std::size_t x = 0U; x < width; ++x) {
+                if (depth[y, x]
+                    > 0.0F
+                    && colors_with_shadows[y, x]
+                    != colors_without_shadows[y, x]) {
+                    ++changed_shadow_pixels;
+                    REQUIRE(colors_with_shadows[y, x] < colors_without_shadows[y, x]);
+                }
+            }
+        }
+        REQUIRE(changed_shadow_pixels > 20U);
     }
 
     // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
@@ -111,7 +346,7 @@ namespace {
         };
         raster::Framebuffer framebuffer{width, height};
         raster::render::TileRenderer renderer{4U};
-        const auto render = [&]() noexcept {
+        const auto render = [&] noexcept {
             return renderer
                 .render_scene(framebuffer, *mesh, 0U, false, true, false, false, texture, camera);
         };

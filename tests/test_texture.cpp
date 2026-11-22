@@ -127,6 +127,27 @@ namespace {
         REQUIRE(linear.y == 0.5F);
         REQUIRE(linear.z == 0.5F);
 
+        raster::TgaImage color_order_image{};
+        color_order_image.width = 1U;
+        color_order_image.height = 1U;
+        color_order_image.pixels = {0xFF204080U};
+        const raster::Texture2D<std::layout_right> color_order{
+            color_order_image,
+            raster::TextureColorSpace::Srgb
+        };
+        const auto color_order_sample = color_order.sample_trilinear_linear(0.5F, 0.5F, 0.0F);
+        REQUIRE(color_order_sample.z > color_order_sample.y);
+        REQUIRE(color_order_sample.y > color_order_sample.x);
+        REQUIRE(color_order.sample_trilinear(0.5F, 0.5F, 0.0F) == 0xFF204080U);
+        std::array<std::uint32_t, 4> color_order_quad{};
+        color_order.sample_trilinear_quad4(
+            {0.5F, 0.5F, 0.5F, 0.5F},
+            {0.5F, 0.5F, 0.5F, 0.5F},
+            0.0F,
+            color_order_quad
+        );
+        REQUIRE(color_order_quad[0] == 0xFF204080U);
+
         // The generated 1x1 mip must also average in linear light and be stored
         // back as sRGB bytes, so sampling that mip gives the same midpoint.
         REQUIRE(srgb.level_count() == 2U);
@@ -141,6 +162,8 @@ namespace {
         REQUIRE(mip_linear.y < 0.504F);
         REQUIRE(mip_linear.z > 0.5F);
         REQUIRE(mip_linear.z < 0.504F);
+        const auto mip_encoded = srgb.sample_trilinear(0.5F, 0.5F, 1.0F);
+        REQUIRE(mip_encoded == 0xFFBCBCBCU);
 
         const std::array<float, 4> quad_u{0.125F, 0.375F, 0.625F, 0.875F};
         const std::array<float, 4> quad_v{0.25F, 0.5F, 0.75F, 1.25F};
@@ -149,6 +172,15 @@ namespace {
         for (std::size_t lane = 0; lane < 4U; ++lane) {
             REQUIRE(quad_samples[lane] == srgb.sample_trilinear(quad_u[lane], quad_v[lane], 0.5F));
         }
+        const auto scalar_encoded = srgb.sample_trilinear(0.37F, 0.82F, 0.35F);
+        std::array<std::uint32_t, 4> arbitrary_quad{};
+        srgb.sample_trilinear_quad4(
+            {0.37F, 0.37F, 0.37F, 0.37F},
+            {0.82F, 0.82F, 0.82F, 0.82F},
+            0.35F,
+            arbitrary_quad
+        );
+        REQUIRE(arbitrary_quad[0] == scalar_encoded);
 
         // Alpha is linear data, not sRGB: 0/255 at a midpoint stays 127.5
         // and uses the project's existing round-half-up quantization to 128.
@@ -277,14 +309,14 @@ namespace {
             }
         }
 
-        const auto check_layout = [&image]<typename Layout>() {
+        const auto check_layout = [&image]<typename Layout> {
             const raster::Texture2D<Layout> texture{image};
             std::uint32_t state = 0x12345678U;
-            const auto next = [&state]() noexcept {
+            const auto next = [&state] noexcept {
                 state = state * 1'664'525U + 1'013'904'223U;
                 return state;
             };
-            const auto unit = [&next]() noexcept {
+            const auto unit = [&next] noexcept {
                 return static_cast<float>(next() >> 8U) * (1.0F / 16777216.0F);
             };
             const std::array<float, 5> lods{0.0F, 0.37F, 1.5F, 5.0F, 100.0F};

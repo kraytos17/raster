@@ -12,7 +12,7 @@ namespace raster::pbr {
     inline constexpr float minimum_cosine = 1.0e-6F;
 
     struct Material {
-        Vec3f base_color{}; // linear-light RGB
+        Vec3f base_color{.x = 1.0F, .y = 1.0F, .z = 1.0F}; // linear-light RGB
         float metallic{};
         float perceptual_roughness{1.0F};
     };
@@ -107,8 +107,9 @@ namespace raster::pbr {
         };
     }
 
-    // Direct Cook-Torrance metallic-roughness BRDF. Returned BRDF is not
-    // multiplied by sun radiance or NoL; evaluate_direct applies both.
+    // Direct Cook-Torrance metallic-roughness BRDF. `light` points from the
+    // surface toward the source. Returned BRDF is not multiplied by sun
+    // radiance or NoL; evaluate_direct applies both.
     [[nodiscard]]
     inline Vec3f evaluate_brdf(
         const Material& material, const Vec3f& normal, const Vec3f& view, const Vec3f& light
@@ -139,11 +140,23 @@ namespace raster::pbr {
 
         const auto fresnel = fresnel_schlick(parameters.f0, vo_h);
         const auto specular_scale = distribution * visibility;
-        const auto diffuse_scale = (1.0F - saturate(material.metallic)) / pi;
+        const auto diffuse_scale = 1.0F / pi;
         return Vec3f{
-            .x = parameters.diffuse_color.x * diffuse_scale + fresnel.x * specular_scale,
-            .y = parameters.diffuse_color.y * diffuse_scale + fresnel.y * specular_scale,
-            .z = parameters.diffuse_color.z * diffuse_scale + fresnel.z * specular_scale,
+            .x = parameters.diffuse_color.x
+                * (1.0F - fresnel.x)
+                * diffuse_scale
+                + fresnel.x
+                * specular_scale,
+            .y = parameters.diffuse_color.y
+                * (1.0F - fresnel.y)
+                * diffuse_scale
+                + fresnel.y
+                * specular_scale,
+            .z = parameters.diffuse_color.z
+                * (1.0F - fresnel.z)
+                * diffuse_scale
+                + fresnel.z
+                * specular_scale,
         };
     }
 

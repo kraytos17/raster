@@ -98,6 +98,11 @@ namespace raster {
         }
 
         [[nodiscard]]
+        TextureColorSpace color_space() const noexcept {
+            return color_space_;
+        }
+
+        [[nodiscard]]
         std::size_t width(std::size_t level = 0) const noexcept {
             return levels_[std::min(level, levels_.size() - 1U)].width;
         }
@@ -136,11 +141,13 @@ namespace raster {
                 const auto low = sample_bilinear_linear(u, v, low_level);
                 const auto high = sample_bilinear_linear(u, v, high_level);
                 std::array<float, 4> encoded{};
-                for (std::size_t channel = 0; channel < 4U; ++channel) {
-                    const auto linear = low[channel] + (high[channel] - low[channel]) * fraction;
-                    encoded[channel] =
-                        channel < 3U ? linear_to_srgb(linear) * 255.0F : linear * 255.0F;
-                }
+                const auto mix = [&](std::size_t channel) noexcept {
+                    return low[channel] + (high[channel] - low[channel]) * fraction;
+                };
+                encoded[0] = linear_to_srgb(mix(0U)) * 255.0F;
+                encoded[1] = linear_to_srgb(mix(1U)) * 255.0F;
+                encoded[2] = linear_to_srgb(mix(2U)) * 255.0F;
+                encoded[3] = mix(3U) * 255.0F;
                 return pack_channels(encoded);
             }
 
@@ -165,9 +172,11 @@ namespace raster {
             const auto low = sample_bilinear_linear(u, v, low_level);
             const auto high = sample_bilinear_linear(u, v, high_level);
             return Vec4f{
-                .x = low[0] + (high[0] - low[0]) * fraction,
+                // Packed texels are 0xAARRGGBB, so the filtered byte channels
+                // are B,G,R,A while the public vector contract is R,G,B,A.
+                .x = low[2] + (high[2] - low[2]) * fraction,
                 .y = low[1] + (high[1] - low[1]) * fraction,
-                .z = low[2] + (high[2] - low[2]) * fraction,
+                .z = low[0] + (high[0] - low[0]) * fraction,
                 .w = low[3] + (high[3] - low[3]) * fraction,
             };
         }
@@ -186,9 +195,9 @@ namespace raster {
                 for (std::size_t lane = 0; lane < 4U; ++lane) {
                     const auto linear = sample_trilinear_linear(u[lane], v[lane], lod);
                     const std::array<float, 4> encoded{
-                        linear_to_srgb(linear.x) * 255.0F,
-                        linear_to_srgb(linear.y) * 255.0F,
                         linear_to_srgb(linear.z) * 255.0F,
+                        linear_to_srgb(linear.y) * 255.0F,
+                        linear_to_srgb(linear.x) * 255.0F,
                         linear.w * 255.0F,
                     };
                     out[lane] = pack_channels(encoded);

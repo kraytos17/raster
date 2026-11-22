@@ -9,8 +9,16 @@
 #include "raster/memory/soa_mesh.hpp"
 #include "raster/memory/texture.hpp"
 #include "raster/memory/texture_layout.hpp"
+#include "raster/pipeline/pbr.hpp"
 
 namespace raster::render {
+    // Diffuse preserves the legacy byte-oriented path. Pbr requires an Srgb
+    // base-color texture; material.base_color is a linear-light multiplier.
+    enum class SceneShading {
+        Diffuse,
+        Pbr,
+    };
+
     struct FreeLookCamera {
         Vec3f position{};
         float yaw{};
@@ -44,7 +52,9 @@ namespace raster::render {
             bool guard_band_test,
             bool solid_color_debug,
             const Texture2D<LayoutTiled4x4>& texture,
-            const FreeLookCamera& camera
+            const FreeLookCamera& camera,
+            SceneShading shading = SceneShading::Diffuse,
+            const pbr::Material& material = {}
         ) noexcept;
 
     private:
@@ -66,7 +76,9 @@ namespace raster::render {
         bool guard_band_test,
         bool solid_color_debug,
         const Texture2D<LayoutTiled4x4>& texture,
-        const FreeLookCamera& camera
+        const FreeLookCamera& camera,
+        SceneShading shading = SceneShading::Diffuse,
+        const pbr::Material& material = {}
     ) noexcept;
 
     [[nodiscard]]

@@ -71,7 +71,10 @@ namespace raster::render {
                 const Texture2D<Layout>* texture{};
                 const ShadowMap* shadow_map{};
                 bool solid_color_debug{};
-                Vec3f sun_direction{};
+                SceneShading shading{SceneShading::Diffuse};
+                pbr::Material material{};
+                Vec3f eye_position{};
+                Vec3f sun_direction{}; // unit vector from the surface toward the sun
                 float ambient{};
                 float sun_scale{};
                 float shadow_bias{};
@@ -84,12 +87,13 @@ namespace raster::render {
                 Vec4f clip_pos{};
                 Vec2f uv{};
                 Vec3f normal{};
+                Vec3f position{};
                 Vec4f light_clip{};
                 float mip_lod{};
 
                 [[nodiscard]]
                 constexpr auto attributes(this auto&& self) noexcept {
-                    return std::tie(self.uv, self.normal, self.light_clip);
+                    return std::tie(self.uv, self.normal, self.position, self.light_clip);
                 }
             };
 
@@ -105,6 +109,7 @@ namespace raster::render {
                     .clip_pos = uniforms.model_view_projection * world,
                     .uv = uv,
                     .normal = normal,
+                    .position = position,
                     .light_clip = uniforms.light_view_projection * world,
                 };
             }
@@ -118,6 +123,36 @@ namespace raster::render {
 
                 const auto gain = uniforms.ambient + diffuse * uniforms.sun_scale;
                 return Vec3f{.x = albedo.x * gain, .y = albedo.y * gain, .z = albedo.z * gain};
+            }
+
+            [[nodiscard]]
+            Vec3f shade_pbr(
+                Vec3f base_color, Vec3f position, Vec3f normal, bool lit
+            ) const noexcept {
+                const auto n = normalize(normal);
+                const auto view = normalize(uniforms.eye_position - position);
+                auto material = uniforms.material;
+                material.base_color = base_color;
+                const auto direct = pbr::evaluate_direct(
+                    material,
+                    n,
+                    view,
+                    uniforms.sun_direction,
+                    Vec3f{
+                        .x = uniforms.sun_scale,
+                        .y = uniforms.sun_scale,
+                        .z = uniforms.sun_scale,
+                    },
+                    lit ? 1.0F : 0.0F
+                );
+                // Deliberately non-physical linear fill remains independent of
+                // shadow visibility; it is not part of the direct BRDF.
+                const auto fill = uniforms.ambient * (1.0F - pbr::saturate(material.metallic));
+                return Vec3f{
+                    .x = direct.x + base_color.x * fill,
+                    .y = direct.y + base_color.y * fill,
+                    .z = direct.z + base_color.z * fill,
+                };
             }
 
             // Shadow test for one fragment: project the interpolated light
@@ -179,29 +214,56 @@ namespace raster::render {
 
             [[nodiscard]]
             constexpr Vec4f fragment(const Varyings& varying) const noexcept {
-                const auto texel = uniforms.solid_color_debug ? 0xFFB0B0B0U
-                    : uniforms.texture == nullptr
-                    ? ((static_cast<int>(std::floor(varying.uv.x))
-                        + static_cast<int>(std::floor(varying.uv.y)))
-                               % 2
-                               == 0
-                           ? 0xFFCCCCCCU
-                           : 0xFF555555U)
-                    : uniforms.texture
-                          ->sample_trilinear(varying.uv.x, varying.uv.y, varying.mip_lod);
+                const auto use_pbr = uniforms.shading == SceneShading::Pbr;
+                const auto texel = [&] -> uint32_t {
+                    if (uniforms.solid_color_debug) {
+                        return 0xFFB0B0B0U;
+                    }
+                    if (uniforms.texture == nullptr) {
+                        const auto u =
+                            static_cast<unsigned int>(static_cast<int>(std::floor(varying.uv.x)));
+                        const auto v =
+                            static_cast<unsigned int>(static_cast<int>(std::floor(varying.uv.y)));
+                        return ((u + v) & 1U) == 0U ? 0xFFCCCCCCU : 0xFF555555U;
+                    }
+                    if (!use_pbr) {
+                        return uniforms.texture
+                            ->sample_trilinear(varying.uv.x, varying.uv.y, varying.mip_lod);
+                    }
+                    return 0U;
+                }();
 
+                const bool textured = !uniforms.solid_color_debug && uniforms.texture != nullptr;
+                const auto sampled = textured && uniforms.shading == SceneShading::Pbr
+                    ? uniforms.texture
+                          ->sample_trilinear_linear(varying.uv.x, varying.uv.y, varying.mip_lod)
+                    : Vec4f{
+                          .x = static_cast<float>((texel >> 16U) & 0xFFU) / 255.0F,
+                          .y = static_cast<float>((texel >> 8U) & 0xFFU) / 255.0F,
+                          .z = static_cast<float>(texel & 0xFFU) / 255.0F,
+                          .w = 1.0F,
+                      };
+                const Vec3f texture_color{.x = sampled.x, .y = sampled.y, .z = sampled.z};
                 const Vec3f albedo{
-                    .x = static_cast<float>((texel >> 16U) & 0xFFU) / 255.0F,
-                    .y = static_cast<float>((texel >> 8U) & 0xFFU) / 255.0F,
-                    .z = static_cast<float>(texel & 0xFFU) / 255.0F,
+                    .x = texture_color.x * uniforms.material.base_color.x,
+                    .y = texture_color.y * uniforms.material.base_color.y,
+                    .z = texture_color.z * uniforms.material.base_color.z,
                 };
 
                 // Solid and checker diagnostics stay unlit; only the textured
                 // path goes through the sun and the shadow map.
-                const bool textured = !uniforms.solid_color_debug && uniforms.texture != nullptr;
                 const bool lit = textured && shadow_lit(varying.light_clip, varying.normal);
-                const auto shaded = textured ? shade_lit(albedo, varying.normal, lit) : albedo;
-                return Vec4f{.x = shaded.x, .y = shaded.y, .z = shaded.z, .w = 1.0F};
+                const auto shaded = !textured ? texture_color
+                    : use_pbr ? shade_pbr(albedo, varying.position, varying.normal, lit)
+                              : shade_lit(albedo, varying.normal, lit);
+
+                const bool pbr_output = textured && uniforms.shading == SceneShading::Pbr;
+                return Vec4f{
+                    .x = pbr_output ? linear_to_srgb(shaded.x) : std::clamp(shaded.x, 0.0F, 1.0F),
+                    .y = pbr_output ? linear_to_srgb(shaded.y) : std::clamp(shaded.y, 0.0F, 1.0F),
+                    .z = pbr_output ? linear_to_srgb(shaded.z) : std::clamp(shaded.z, 0.0F, 1.0F),
+                    .w = 1.0F,
+                };
             }
         };
 
@@ -223,6 +285,7 @@ namespace raster::render {
             const QuadBarycentrics& quad,
             const std::array<Vec2f, 4>& quad_uv,
             const std::array<Vec3f, 4>& quad_normal,
+            const std::array<Vec3f, 4>& quad_position,
             const std::array<Vec4f, 4>& quad_light,
             float lod
         ) noexcept {
@@ -237,6 +300,39 @@ namespace raster::render {
                     static_cast<std::uint64_t>(std::popcount(quad.visible_mask)),
                     std::memory_order_relaxed
                 );
+            }
+            if (!shader.uniforms.solid_color_debug
+                && shader.uniforms.texture
+                != nullptr
+                && shader.uniforms.shading
+                == SceneShading::Pbr) {
+                for (const auto lane : std::views::iota(std::size_t{0}, std::size_t{4})) {
+                    if ((quad.visible_mask & (1U << lane)) == 0U) {
+                        continue;
+                    }
+
+                    const auto sampled = shader.uniforms.texture->sample_trilinear_linear(
+                        quad_uv[lane].x,
+                        quad_uv[lane].y,
+                        lod
+                    );
+                    const auto base_color = Vec3f{
+                        .x = sampled.x * shader.uniforms.material.base_color.x,
+                        .y = sampled.y * shader.uniforms.material.base_color.y,
+                        .z = sampled.z * shader.uniforms.material.base_color.z,
+                    };
+
+                    const auto lit = shader.shadow_lit(quad_light[lane], quad_normal[lane]);
+                    const auto shaded =
+                        shader.shade_pbr(base_color, quad_position[lane], quad_normal[lane], lit);
+                    color[quad_y + (lane >> 1U), quad_x + (lane & 1U)] = pack_channels({
+                        linear_to_srgb(shaded.z) * 255.0F,
+                        linear_to_srgb(shaded.y) * 255.0F,
+                        linear_to_srgb(shaded.x) * 255.0F,
+                        255.0F,
+                    });
+                }
+                return;
             }
             if (!shader.uniforms.solid_color_debug && shader.uniforms.texture != nullptr) {
                 std::array<float, 4> u{};
@@ -316,6 +412,7 @@ namespace raster::render {
                         .clip_pos = varying_a.clip_pos,
                         .uv = quad_uv[lane],
                         .normal = quad_normal[lane],
+                        .position = quad_position[lane],
                         .light_clip = quad_light[lane],
                         .mip_lod = lod,
                     }
@@ -444,6 +541,7 @@ namespace raster::render {
                 [&](std::size_t quad_x, std::size_t quad_y, const QuadBarycentrics& quad) noexcept {
                 std::array<Vec2f, 4> quad_uv{};
                 std::array<Vec3f, 4> quad_normal{};
+                std::array<Vec3f, 4> quad_position{};
                 std::array<Vec4f, 4> quad_light{};
                 for (const auto lane : std::views::iota(std::size_t{0}, std::size_t{4})) {
                     const auto& barycentrics = quad.lanes[lane];
@@ -452,7 +550,8 @@ namespace raster::render {
 
                     quad_uv[lane] = std::get<0>(attributes);
                     quad_normal[lane] = std::get<1>(attributes);
-                    quad_light[lane] = std::get<2>(attributes);
+                    quad_position[lane] = std::get<2>(attributes);
+                    quad_light[lane] = std::get<3>(attributes);
                 }
 
                 const auto derivatives = quad_derivatives(quad_uv);
@@ -470,6 +569,7 @@ namespace raster::render {
                     quad,
                     quad_uv,
                     quad_normal,
+                    quad_position,
                     quad_light,
                     lod
                 );
@@ -635,13 +735,16 @@ namespace raster::render {
                 [&](std::size_t quad_x, std::size_t quad_y, const QuadBarycentrics& quad) noexcept {
                 std::array<Vec2f, 4> quad_uv{};
                 std::array<Vec3f, 4> quad_normal{};
+                std::array<Vec3f, 4> quad_position{};
                 std::array<Vec4f, 4> quad_light{};
                 for (const auto lane : std::views::iota(std::size_t{0}, std::size_t{4})) {
                     const auto attributes =
                         shader.interpolate(varying_a, varying_b, varying_c, quad.lanes[lane]);
+
                     quad_uv[lane] = std::get<0>(attributes);
                     quad_normal[lane] = std::get<1>(attributes);
-                    quad_light[lane] = std::get<2>(attributes);
+                    quad_position[lane] = std::get<2>(attributes);
+                    quad_light[lane] = std::get<3>(attributes);
                 }
 
                 const auto derivatives = quad_derivatives(quad_uv);
@@ -659,6 +762,7 @@ namespace raster::render {
                     quad,
                     quad_uv,
                     quad_normal,
+                    quad_position,
                     quad_light,
                     lod
                 );
@@ -911,6 +1015,8 @@ namespace raster::render {
         bool solid_color_debug,
         const Texture2D<Layout>& texture,
         const FreeLookCamera& camera,
+        SceneShading shading,
+        const pbr::Material& material,
         bool draw_overlay,
         TileRenderState<Layout>* tile_state = nullptr
     ) noexcept {
@@ -918,6 +1024,9 @@ namespace raster::render {
         const auto height = framebuffer.height;
         if (width < 2U || height < 2U) {
             return true;
+        }
+        if (shading == SceneShading::Pbr && texture.color_space() != TextureColorSpace::Srgb) {
+            return false;
         }
 
         simd::stream_fill_u32(framebuffer.color_storage, 0xFF101018U);
@@ -975,6 +1084,10 @@ namespace raster::render {
         shader.uniforms.model_view_projection = projection * view;
         shader.uniforms.texture = &texture;
         shader.uniforms.solid_color_debug = solid_color_debug;
+        shader.uniforms.shading = shading;
+        shader.uniforms.material = material;
+        shader.uniforms.eye_position = eye;
+        // Direction points from a shaded point toward the directional light.
         shader.uniforms.sun_direction = normalize(Vec3f{.x = 0.0F, .y = 3.0F, .z = 4.0F});
         shader.uniforms.ambient = 0.4F;
         shader.uniforms.sun_scale = 0.6F;
@@ -1075,7 +1188,9 @@ namespace raster::render {
         bool guard_band_test,
         bool solid_color_debug,
         const Texture2D<LayoutTiled4x4>& texture,
-        const FreeLookCamera& camera
+        const FreeLookCamera& camera,
+        SceneShading shading,
+        const pbr::Material& material
     ) noexcept {
         return render_scene_impl(
             framebuffer,
@@ -1087,6 +1202,8 @@ namespace raster::render {
             solid_color_debug,
             texture,
             camera,
+            shading,
+            material,
             true
         );
     }
@@ -1107,7 +1224,9 @@ namespace raster::render {
         bool guard_band_test,
         bool solid_color_debug,
         const Texture2D<LayoutTiled4x4>& texture,
-        const FreeLookCamera& camera
+        const FreeLookCamera& camera,
+        SceneShading shading,
+        const pbr::Material& material
     ) noexcept {
         return render_scene_impl(
             framebuffer,
@@ -1119,6 +1238,8 @@ namespace raster::render {
             solid_color_debug,
             texture,
             camera,
+            shading,
+            material,
             true,
             impl_.get()
         );
@@ -1142,6 +1263,8 @@ namespace raster::render {
             false,
             texture,
             camera,
+            SceneShading::Diffuse,
+            pbr::Material(),
             false
         );
     }
@@ -1164,6 +1287,8 @@ namespace raster::render {
             false,
             texture,
             camera,
+            SceneShading::Diffuse,
+            pbr::Material(),
             false
         );
     }
@@ -1186,6 +1311,8 @@ namespace raster::render {
             false,
             texture,
             camera,
+            SceneShading::Diffuse,
+            pbr::Material(),
             false
         );
     }

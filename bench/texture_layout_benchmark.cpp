@@ -553,7 +553,7 @@ namespace {
 
         // Fixture A is fully allocated/warmed before churn and remains live.
         auto fixture_before = std::make_unique<AgingRenderer>(width, height);
-        const auto render_before = [&]() noexcept {
+        const auto render_before = [&] noexcept {
             return fixture_before->render(*mesh_result, texture, camera);
         };
         if (!render_before()) {

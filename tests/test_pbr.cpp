@@ -109,6 +109,23 @@ namespace {
         REQUIRE(backface.y == 0.0F);
         REQUIRE(backface.z == 0.0F);
     }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE("white dielectric normal-incidence BRDF matches the hand case", "[pbr][brdf]") {
+        constexpr raster::pbr::Material material{
+            .base_color = raster::Vec3f{.x = 1.0F, .y = 1.0F, .z = 1.0F},
+            .metallic = 0.0F,
+            .perceptual_roughness = 1.0F,
+        };
+        constexpr raster::Vec3f normal{.x = 0.0F, .y = 0.0F, .z = 1.0F};
+        const auto brdf = raster::pbr::evaluate_brdf(material, normal, normal, normal);
+        // Lambert diffuse is (1-F)/pi = 0.96/pi. At alpha=1,
+        // D=1/pi and correlated V=1/4, so specular is 0.01/pi.
+        const auto expected = 0.97F / raster::pbr::pi;
+        REQUIRE(std::fabs(brdf.x - expected) < 1.0e-7F);
+        REQUIRE(std::fabs(brdf.y - expected) < 1.0e-7F);
+        REQUIRE(std::fabs(brdf.z - expected) < 1.0e-7F);
+    }
 } // namespace
 
 #if defined(__clang__)
