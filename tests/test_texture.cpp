@@ -87,6 +87,84 @@ namespace {
     }
 
     // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE("sRGB transfer functions pin standard reference values", "[texture][color-space]") {
+        REQUIRE(raster::srgb_to_linear(0.0F) == 0.0F);
+        REQUIRE(raster::srgb_to_linear(0.04045F) > 0.0031307F);
+        REQUIRE(raster::srgb_to_linear(0.04045F) < 0.0031309F);
+        REQUIRE(raster::srgb_to_linear(0.5F) > 0.214040F);
+        REQUIRE(raster::srgb_to_linear(0.5F) < 0.214042F);
+        REQUIRE(raster::srgb_to_linear(1.0F) == 1.0F);
+
+        REQUIRE(raster::linear_to_srgb(0.0F) == 0.0F);
+        REQUIRE(raster::linear_to_srgb(0.0031308F) > 0.04044F);
+        REQUIRE(raster::linear_to_srgb(0.0031308F) < 0.04046F);
+        REQUIRE(raster::linear_to_srgb(0.5F) > 0.73535F);
+        REQUIRE(raster::linear_to_srgb(0.5F) < 0.73537F);
+        REQUIRE(raster::linear_to_srgb(1.0F) == 1.0F);
+        REQUIRE(raster::srgb_to_linear(-1.0F) == 0.0F);
+        REQUIRE(raster::srgb_to_linear(2.0F) == 1.0F);
+        REQUIRE(raster::linear_to_srgb(-1.0F) == 0.0F);
+        REQUIRE(raster::linear_to_srgb(2.0F) == 1.0F);
+    }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE("sRGB texture filters and builds mipmaps in linear light", "[texture][color-space]") {
+        raster::TgaImage image{};
+        image.width = 2U;
+        image.height = 2U;
+        image.pixels = {0xFF000000U, 0xFFFFFFFFU, 0xFFFFFFFFU, 0xFF000000U};
+
+        const raster::Texture2D<std::layout_right> legacy{image};
+        const raster::Texture2D<std::layout_right> srgb{image, raster::TextureColorSpace::Srgb};
+
+        // Compatibility mode preserves the prior byte-space midpoint (128).
+        REQUIRE(legacy.sample_trilinear(0.5F, 0.5F, 0.0F) == 0xFF808080U);
+        // Correct sRGB filtering averages 0 and 1 in linear -> 0.5 linear ->
+        // sRGB ~= 0.735356, which quantizes to 188 rather than 128.
+        REQUIRE(srgb.sample_trilinear(0.5F, 0.5F, 0.0F) == 0xFFBCBCBCU);
+        const auto linear = srgb.sample_trilinear_linear(0.5F, 0.5F, 0.0F);
+        REQUIRE(linear.x == 0.5F);
+        REQUIRE(linear.y == 0.5F);
+        REQUIRE(linear.z == 0.5F);
+
+        // The generated 1x1 mip must also average in linear light and be stored
+        // back as sRGB bytes, so sampling that mip gives the same midpoint.
+        REQUIRE(srgb.level_count() == 2U);
+        REQUIRE(srgb.level(1U).texels[0] == 0xFFBCBCBCU);
+        REQUIRE(srgb.sample_trilinear(0.5F, 0.5F, 1.0F) == 0xFFBCBCBCU);
+        const auto mip_linear = srgb.sample_trilinear_linear(0.5F, 0.5F, 1.0F);
+        // Mip levels are stored as 8-bit sRGB, so re-decoding the quantized
+        // 188 value is within one byte-step of the ideal 0.5 linear average.
+        REQUIRE(mip_linear.x > 0.5F);
+        REQUIRE(mip_linear.x < 0.504F);
+        REQUIRE(mip_linear.y > 0.5F);
+        REQUIRE(mip_linear.y < 0.504F);
+        REQUIRE(mip_linear.z > 0.5F);
+        REQUIRE(mip_linear.z < 0.504F);
+
+        const std::array<float, 4> quad_u{0.125F, 0.375F, 0.625F, 0.875F};
+        const std::array<float, 4> quad_v{0.25F, 0.5F, 0.75F, 1.25F};
+        std::array<std::uint32_t, 4> quad_samples{};
+        srgb.sample_trilinear_quad4(quad_u, quad_v, 0.5F, quad_samples);
+        for (std::size_t lane = 0; lane < 4U; ++lane) {
+            REQUIRE(quad_samples[lane] == srgb.sample_trilinear(quad_u[lane], quad_v[lane], 0.5F));
+        }
+
+        // Alpha is linear data, not sRGB: 0/255 at a midpoint stays 127.5
+        // and uses the project's existing round-half-up quantization to 128.
+        raster::TgaImage alpha_image{};
+        alpha_image.width = 2U;
+        alpha_image.height = 1U;
+        alpha_image.pixels = {0x00000000U, 0xFFFFFFFFU};
+        const raster::Texture2D<std::layout_right> alpha_texture{
+            alpha_image,
+            raster::TextureColorSpace::Srgb,
+        };
+        REQUIRE(alpha_texture.sample_trilinear(0.5F, 0.5F, 0.0F) == 0x80BCBCBCU);
+        REQUIRE(alpha_texture.sample_trilinear_linear(0.5F, 0.5F, 0.0F).w == 0.5F);
+    }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
     TEST_CASE("swizzled layouts are bijective for padded dimensions", "[texture][layout]") {
         using Extents = std::dextents<std::size_t, 2>;
         const Extents extents{5U, 7U};

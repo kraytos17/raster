@@ -13,6 +13,27 @@
 #include "raster/pipeline/simd_quad.hpp"
 
 namespace raster {
+    enum class TextureColorSpace {
+        EncodedBytes, // legacy/data-texture mode; existing behavior unchanged
+        Srgb, // decode RGB to linear before filtering; alpha/data stay linear
+    };
+
+    [[nodiscard]]
+    inline float srgb_to_linear(float encoded) noexcept {
+        const auto value = std::clamp(encoded, 0.0F, 1.0F);
+        return value <= 0.04045F ? value / 12.92F : std::pow((value + 0.055F) / 1.055F, 2.4F);
+    }
+
+    [[nodiscard]]
+    inline float linear_to_srgb(float linear) noexcept {
+        const auto value = std::clamp(linear, 0.0F, 1.0F);
+        if (value == 0.0F || value == 1.0F) {
+            return value;
+        }
+        return value <= 0.0031308F ? value * 12.92F
+                                   : 1.055F * std::pow(value, 1.0F / 2.4F) - 0.055F;
+    }
+
     struct TextureLevel {
         std::size_t width{};
         std::size_t height{};
@@ -49,9 +70,12 @@ namespace raster {
 
         Texture2D() = default;
 
-        explicit Texture2D(const TgaImage& image) :
+        explicit Texture2D(
+            const TgaImage& image, TextureColorSpace color_space = TextureColorSpace::EncodedBytes
+        ) :
             width_{image.width},
-            height_{image.height} {
+            height_{image.height},
+            color_space_{color_space} {
             const typename View::mapping_type mapping{Extents{height_, width_}};
             levels_.push_back(
                 TextureLevel{
@@ -108,6 +132,18 @@ namespace raster {
             const auto low_level = static_cast<std::size_t>(std::floor(clamped_lod));
             const auto high_level = std::min(low_level + 1U, levels_.size() - 1U);
             const auto fraction = clamped_lod - static_cast<float>(low_level);
+            if (color_space_ == TextureColorSpace::Srgb) {
+                const auto low = sample_bilinear_linear(u, v, low_level);
+                const auto high = sample_bilinear_linear(u, v, high_level);
+                std::array<float, 4> encoded{};
+                for (std::size_t channel = 0; channel < 4U; ++channel) {
+                    const auto linear = low[channel] + (high[channel] - low[channel]) * fraction;
+                    encoded[channel] =
+                        channel < 3U ? linear_to_srgb(linear) * 255.0F : linear * 255.0F;
+                }
+                return pack_channels(encoded);
+            }
+
             const auto low = sample_bilinear_channels(u, v, low_level);
             const auto high = sample_bilinear_channels(u, v, high_level);
             std::array<float, 4> mixed{};
@@ -115,6 +151,25 @@ namespace raster {
                 mixed[channel] = low[channel] + (high[channel] - low[channel]) * fraction;
             }
             return pack_channels(mixed);
+        }
+
+        // Sample the texture as linear-light RGBA. In sRGB mode, RGB is decoded
+        // before bilinear/trilinear interpolation and alpha remains linear.
+        // EncodedBytes mode preserves the historical byte-domain sampler.
+        [[nodiscard]]
+        Vec4f sample_trilinear_linear(float u, float v, float lod) const noexcept {
+            const auto clamped_lod = std::clamp(lod, 0.0F, static_cast<float>(levels_.size() - 1U));
+            const auto low_level = static_cast<std::size_t>(std::floor(clamped_lod));
+            const auto high_level = std::min(low_level + 1U, levels_.size() - 1U);
+            const auto fraction = clamped_lod - static_cast<float>(low_level);
+            const auto low = sample_bilinear_linear(u, v, low_level);
+            const auto high = sample_bilinear_linear(u, v, high_level);
+            return Vec4f{
+                .x = low[0] + (high[0] - low[0]) * fraction,
+                .y = low[1] + (high[1] - low[1]) * fraction,
+                .z = low[2] + (high[2] - low[2]) * fraction,
+                .w = low[3] + (high[3] - low[3]) * fraction,
+            };
         }
 
         // Four-lane trilinear for one 2x2 quad: scalar gathers per lane (same
@@ -127,8 +182,21 @@ namespace raster {
             float lod,
             std::array<std::uint32_t, 4>& out
         ) const noexcept {
-            const auto clamped_lod = std::clamp(lod, 0.0F, static_cast<float>(levels_.size() - 1U));
+            if (color_space_ == TextureColorSpace::Srgb) {
+                for (std::size_t lane = 0; lane < 4U; ++lane) {
+                    const auto linear = sample_trilinear_linear(u[lane], v[lane], lod);
+                    const std::array<float, 4> encoded{
+                        linear_to_srgb(linear.x) * 255.0F,
+                        linear_to_srgb(linear.y) * 255.0F,
+                        linear_to_srgb(linear.z) * 255.0F,
+                        linear.w * 255.0F,
+                    };
+                    out[lane] = pack_channels(encoded);
+                }
+                return;
+            }
 
+            const auto clamped_lod = std::clamp(lod, 0.0F, static_cast<float>(levels_.size() - 1U));
             const auto low_level = static_cast<std::size_t>(std::floor(clamped_lod));
             const auto high_level = std::min(low_level + 1U, levels_.size() - 1U);
             const auto fraction = clamped_lod - static_cast<float>(low_level);
@@ -218,6 +286,39 @@ namespace raster {
         }
 
     private:
+
+        [[nodiscard]]
+        std::array<float, 4> sample_bilinear_linear(
+            float u, float v, std::size_t mip_level
+        ) const noexcept {
+            const auto& mip = levels_[std::min(mip_level, levels_.size() - 1U)];
+            std::array<std::uint32_t, 4> corners{};
+            float fraction_x{};
+            float fraction_y{};
+            gather_bilinear_corners(mip, u, v, corners, fraction_x, fraction_y);
+            const auto wx0 = 1.0F - fraction_x;
+            const auto wy0 = 1.0F - fraction_y;
+            const auto decode = [this](std::uint32_t texel, std::size_t channel) noexcept {
+                const auto shift = static_cast<std::uint32_t>(channel * 8U);
+                const auto encoded = static_cast<float>((texel >> shift) & 0xFFU) / 255.0F;
+                return color_space_ == TextureColorSpace::Srgb && channel < 3U
+                    ? srgb_to_linear(encoded)
+                    : encoded;
+            };
+
+            std::array<float, 4> result{};
+            for (std::size_t channel = 0; channel < 4U; ++channel) {
+                const auto v00 = decode(corners[0], channel);
+                const auto v10 = decode(corners[1], channel);
+                const auto v01 = decode(corners[2], channel);
+                const auto v11 = decode(corners[3], channel);
+                result[channel] = (v00 * wx0 + v10 * fraction_x)
+                    * wy0
+                    + (v01 * wx0 + v11 * fraction_x)
+                    * fraction_y;
+            }
+            return result;
+        }
 
         // Scalar corner gather shared by the single-pixel and quad paths:
         // wrap, floor, wrap-index, and texel loads in the same order, so both
@@ -323,6 +424,7 @@ namespace raster {
                 for (std::size_t y = 0; y < next_height; ++y) {
                     for (std::size_t x = 0; x < next_width; ++x) {
                         std::array<std::uint32_t, 4> sums{};
+                        std::array<float, 4> linear_sums{};
                         std::size_t sample_count = 0;
                         for (std::size_t dy = 0; dy < 2U; ++dy) {
                             for (std::size_t dx = 0; dx < 2U; ++dx) {
@@ -331,17 +433,50 @@ namespace raster {
                                 const auto texel =
                                     source.texels[source_mapping(source_y, source_x)];
                                 for (std::size_t channel = 0; channel < 4U; ++channel) {
-                                    sums[channel] += (texel >> (channel * 8U)) & 0xFFU;
+                                    const auto shift = static_cast<std::uint32_t>(channel * 8U);
+                                    const auto byte = (texel >> shift) & 0xFFU;
+                                    sums[channel] += byte;
+                                    auto value = static_cast<float>(byte);
+                                    if (color_space_ == TextureColorSpace::Srgb && channel < 3U) {
+                                        value = srgb_to_linear(value / 255.0F);
+                                    }
+                                    linear_sums[channel] += value;
                                 }
                                 ++sample_count;
                             }
                         }
 
-                        std::uint32_t result = 0;
+                        std::array<float, 4> averaged{};
                         for (std::size_t channel = 0; channel < 4U; ++channel) {
-                            result |=
-                                ((sums[channel] / static_cast<std::uint32_t>(sample_count)) & 0xFFU)
-                                << (channel * 8U);
+                            if (color_space_ == TextureColorSpace::Srgb && channel < 3U) {
+                                averaged[channel] =
+                                    linear_sums[channel] / static_cast<float>(sample_count);
+                            } else if (color_space_ == TextureColorSpace::Srgb) {
+                                averaged[channel] = static_cast<float>(sums[channel])
+                                    / static_cast<float>(sample_count)
+                                    / 255.0F;
+                            } else {
+                                averaged[channel] = static_cast<float>(sums[channel])
+                                    / static_cast<float>(sample_count);
+                            }
+                        }
+
+                        std::uint32_t result{};
+                        if (color_space_ == TextureColorSpace::Srgb) {
+                            for (std::size_t channel = 0; channel < 3U; ++channel) {
+                                averaged[channel] = linear_to_srgb(averaged[channel]) * 255.0F;
+                            }
+
+                            averaged[3] *= 255.0F;
+                            result = pack_channels(averaged);
+                        } else {
+                            result = 0U;
+                            for (std::size_t channel = 0; channel < 4U; ++channel) {
+                                result |= (sums[channel]
+                                           / static_cast<std::uint32_t>(sample_count)
+                                           & 0xFFU)
+                                    << static_cast<std::uint32_t>(channel * 8U);
+                            }
                         }
                         destination.texels[destination_mapping(y, x)] = result;
                     }
@@ -352,6 +487,7 @@ namespace raster {
 
         std::size_t width_{};
         std::size_t height_{};
+        TextureColorSpace color_space_{TextureColorSpace::EncodedBytes};
         std::vector<TextureLevel> levels_{};
     };
 
