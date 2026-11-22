@@ -812,6 +812,101 @@ namespace {
             REQUIRE(color[center_y, center_x] == 0xFFB0B0B0U);
         }
     }
+
+    raster::SoAMesh make_two_sided_triangle(raster::Vec3f normal) {
+        raster::SoAMesh mesh{};
+        mesh.positions = {
+            raster::Vec3f{.x = -1.0F, .y = -1.0F, .z = 0.0F},
+            raster::Vec3f{.x = 1.0F, .y = -1.0F, .z = 0.0F},
+            raster::Vec3f{.x = 0.0F, .y = 1.0F, .z = 0.0F},
+        };
+        mesh.normals = {normal, normal, normal};
+        mesh.uvs = {
+            raster::Vec2f{.x = 0.5F, .y = 0.5F},
+            raster::Vec2f{.x = 0.5F, .y = 0.5F},
+            raster::Vec2f{.x = 0.5F, .y = 0.5F},
+        };
+        mesh.indices = {0U, 1U, 2U, 0U, 2U, 1U};
+        return mesh;
+    }
+
+    void check_lit_triangle(
+        const raster::SoAMesh& mesh, std::uint32_t texel, std::uint32_t expected
+    ) {
+        // 1-texel texture makes UVs and filtering irrelevant: every covered
+        // pixel must be exactly `expected`, everything else the clear color.
+        // Rendered both serial and tiled to lock their parity under lighting.
+        raster::TgaImage image{};
+        image.width = 1U;
+        image.height = 1U;
+        image.pixels.push_back(texel);
+        const raster::Texture2D<raster::LayoutTiled4x4> texture{image};
+        constexpr std::size_t width = 64U;
+        constexpr std::size_t height = 64U;
+        constexpr std::uint32_t clear = 0xFF101018U;
+        const raster::render::FreeLookCamera camera{
+            .position = raster::Vec3f{.x = 0.0F, .y = 0.0F, .z = 3.0F},
+            .yaw = 0.0F,
+            .pitch = 0.0F,
+        };
+
+        const auto check_frame = [&](const raster::Framebuffer& framebuffer) {
+            const auto colors = std::as_const(framebuffer).color_view();
+            std::size_t lit = 0U;
+            for (std::size_t y = 0; y < height; ++y) {
+                for (std::size_t x = 0; x < width; ++x) {
+                    if (colors[y, x] == expected) {
+                        ++lit;
+                    } else {
+                        REQUIRE(colors[y, x] == clear);
+                    }
+                }
+            }
+            REQUIRE(lit > 20U);
+        };
+
+        raster::Framebuffer serial{width, height};
+        REQUIRE(
+            raster::render::
+                render_scene(serial, mesh, 0U, false, true, false, false, texture, camera)
+        );
+        check_frame(serial);
+
+        raster::Framebuffer tiled{width, height};
+        raster::render::TileRenderer renderer{4U};
+        REQUIRE(renderer.render_scene(tiled, mesh, 0U, false, true, false, false, texture, camera));
+        check_frame(tiled);
+        REQUIRE(tiled.color_storage == serial.color_storage);
+    }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE("backfacing-lit triangle renders ambient only", "[scene][material]") {
+        // Sun is hardcoded as direction normalize((0, 3, 4)) (3-4-5 triangle,
+        // so the normalized components are exactly (0, 0.6, 0.8)), white at
+        // 0.6 with ambient 0.4. A (0, 0, -1) normal gives dot < 0 exactly, so
+        // the diffuse term is exactly 0 and every channel is texel * 0.4:
+        // 200 * 0.4 = 80.0, float error ~1e-5 against a 0.5 boundary.
+        check_lit_triangle(
+            make_two_sided_triangle(raster::Vec3f{.x = 0.0F, .y = 0.0F, .z = -1.0F}),
+            0xFFC8C8C8U,
+            0xFF505050U
+        );
+    }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE("face-on triangle reproduces texels exactly", "[scene][material]") {
+        // Normal (0, 0.6, 0.8) matches the sun direction bit-for-bit, so
+        // diffuse is 1 within 1e-7 and K = 0.4 + 0.6 * d is 1 within 1e-7.
+        // Mid-range bytes stay 3e-5 from any rounding boundary: output must
+        // equal the input texels exactly. Passes before lighting exists too,
+        // which validates the harness (winding, coverage); the ambient test
+        // above is the one that fails until lighting lands.
+        check_lit_triangle(
+            make_two_sided_triangle(raster::Vec3f{.x = 0.0F, .y = 0.6F, .z = 0.8F}),
+            0xFF336699U,
+            0xFF336699U
+        );
+    }
 } // namespace
 
 #if defined(__clang__)

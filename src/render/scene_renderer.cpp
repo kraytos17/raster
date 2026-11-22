@@ -49,6 +49,9 @@ namespace raster::render {
                 Mat4f model_view_projection{};
                 const Texture2D<Layout>* texture{};
                 bool solid_color_debug{};
+                Vec3f sun_direction{};
+                float ambient{};
+                float sun_scale{};
             };
 
             Uniforms uniforms{};
@@ -56,16 +59,17 @@ namespace raster::render {
             struct Varyings {
                 Vec4f clip_pos{};
                 Vec2f uv{};
+                Vec3f normal{};
                 float mip_lod{};
 
                 [[nodiscard]]
                 constexpr auto attributes(this auto&& self) noexcept {
-                    return std::tie(self.uv);
+                    return std::tie(self.uv, self.normal);
                 }
             };
 
             [[nodiscard]]
-            constexpr Varyings vertex(Vec3f position, Vec2f uv) const noexcept {
+            constexpr Varyings vertex(Vec3f position, Vec2f uv, Vec3f normal) const noexcept {
                 return Varyings{
                     .clip_pos = uniforms.model_view_projection
                         * Vec4f{
@@ -75,7 +79,16 @@ namespace raster::render {
                             .w = 1.0F,
                         },
                     .uv = uv,
+                    .normal = normal,
                 };
+            }
+
+            // Ambient + Lambertian diffuse from the uniforms sun.
+            [[nodiscard]]
+            constexpr Vec3f shade_lit(Vec3f albedo, Vec3f normal) const noexcept {
+                const auto diffuse = std::max(dot(normalize(normal), uniforms.sun_direction), 0.0F);
+                const auto gain = uniforms.ambient + diffuse * uniforms.sun_scale;
+                return Vec3f{.x = albedo.x * gain, .y = albedo.y * gain, .z = albedo.z * gain};
             }
 
             [[nodiscard]]
@@ -90,12 +103,18 @@ namespace raster::render {
                            : 0xFF555555U)
                     : uniforms.texture
                           ->sample_trilinear(varying.uv.x, varying.uv.y, varying.mip_lod);
-                return Vec4f{
+
+                const Vec3f albedo{
                     .x = static_cast<float>((texel >> 16U) & 0xFFU) / 255.0F,
                     .y = static_cast<float>((texel >> 8U) & 0xFFU) / 255.0F,
                     .z = static_cast<float>(texel & 0xFFU) / 255.0F,
-                    .w = 1.0F,
                 };
+
+                // Solid and checker diagnostics stay unlit; only the textured
+                // path goes through the sun.
+                const bool lit = !uniforms.solid_color_debug && uniforms.texture != nullptr;
+                const auto shaded = lit ? shade_lit(albedo, varying.normal) : albedo;
+                return Vec4f{.x = shaded.x, .y = shaded.y, .z = shaded.z, .w = 1.0F};
             }
         };
 
@@ -116,6 +135,7 @@ namespace raster::render {
             std::size_t quad_y,
             const QuadBarycentrics& quad,
             const std::array<Vec2f, 4>& quad_uv,
+            const std::array<Vec3f, 4>& quad_normal,
             float lod
         ) noexcept {
             static const bool profile =
@@ -141,6 +161,50 @@ namespace raster::render {
                 std::array<std::uint32_t, 4> packed{};
                 shader.uniforms.texture
                     ->sample_trilinear_quad4(u.data(), v.data(), lod, packed.data());
+                // Unpack, light wide with the same operation order as the
+                // scalar shader math, repack. The sample→pack→unpack roundtrip
+                // is idempotent on texel bytes, so this matches a
+                // single-rounding float path exactly.
+                std::array<float, 4> red{};
+                std::array<float, 4> green{};
+                std::array<float, 4> blue{};
+                std::array<float, 4> nx{};
+                std::array<float, 4> ny{};
+                std::array<float, 4> nz{};
+                for (const auto lane : std::views::iota(std::size_t{0}, std::size_t{4})) {
+                    red[lane] = static_cast<float>((packed[lane] >> 16U) & 0xFFU) / 255.0F;
+                    green[lane] = static_cast<float>((packed[lane] >> 8U) & 0xFFU) / 255.0F;
+                    blue[lane] = static_cast<float>(packed[lane] & 0xFFU) / 255.0F;
+                    nx[lane] = quad_normal[lane].x;
+                    ny[lane] = quad_normal[lane].y;
+                    nz[lane] = quad_normal[lane].z;
+                }
+
+                std::array<float, 4> lit_red{};
+                std::array<float, 4> lit_green{};
+                std::array<float, 4> lit_blue{};
+                simd::apply_light4(
+                    red.data(),
+                    green.data(),
+                    blue.data(),
+                    nx.data(),
+                    ny.data(),
+                    nz.data(),
+                    shader.uniforms.sun_direction.x,
+                    shader.uniforms.sun_direction.y,
+                    shader.uniforms.sun_direction.z,
+                    shader.uniforms.ambient,
+                    shader.uniforms.sun_scale,
+                    lit_red.data(),
+                    lit_green.data(),
+                    lit_blue.data()
+                );
+                simd::quantize_pack4(
+                    lit_red.data(),
+                    lit_green.data(),
+                    lit_blue.data(),
+                    packed.data()
+                );
                 for (const auto lane : std::views::iota(std::size_t{0}, std::size_t{4})) {
                     if ((quad.visible_mask & (1U << lane)) == 0U) {
                         continue;
@@ -162,6 +226,7 @@ namespace raster::render {
                     typename FloorShader<Layout>::Varyings{
                         .clip_pos = varying_a.clip_pos,
                         .uv = quad_uv[lane],
+                        .normal = quad_normal[lane],
                         .mip_lod = lod,
                     }
                 );
@@ -288,11 +353,13 @@ namespace raster::render {
                 framebuffer.depth_view(),
                 [&](std::size_t quad_x, std::size_t quad_y, const QuadBarycentrics& quad) noexcept {
                 std::array<Vec2f, 4> quad_uv{};
+                std::array<Vec3f, 4> quad_normal{};
                 for (const auto lane : std::views::iota(std::size_t{0}, std::size_t{4})) {
                     const auto& barycentrics = quad.lanes[lane];
                     const auto attributes =
                         shader.interpolate(varying_a, varying_b, varying_c, barycentrics);
                     quad_uv[lane] = std::get<0>(attributes);
+                    quad_normal[lane] = std::get<1>(attributes);
                 }
 
                 const auto derivatives = quad_derivatives(quad_uv);
@@ -301,7 +368,17 @@ namespace raster::render {
                     shader.uniforms.texture->width(),
                     shader.uniforms.texture->height()
                 );
-                store_shaded_quad(color, shader, varying_a, quad_x, quad_y, quad, quad_uv, lod);
+                store_shaded_quad(
+                    color,
+                    shader,
+                    varying_a,
+                    quad_x,
+                    quad_y,
+                    quad,
+                    quad_uv,
+                    quad_normal,
+                    lod
+                );
             }
             );
         }
@@ -319,9 +396,21 @@ namespace raster::render {
                 const auto vertex_a = static_cast<std::size_t>(mesh.indices[index_base]);
                 const auto vertex_b = static_cast<std::size_t>(mesh.indices[index_base + 1U]);
                 const auto vertex_c = static_cast<std::size_t>(mesh.indices[index_base + 2U]);
-                const auto varying_a = shader.vertex(mesh.positions[vertex_a], mesh.uvs[vertex_a]);
-                const auto varying_b = shader.vertex(mesh.positions[vertex_b], mesh.uvs[vertex_b]);
-                const auto varying_c = shader.vertex(mesh.positions[vertex_c], mesh.uvs[vertex_c]);
+                const auto varying_a = shader.vertex(
+                    mesh.positions[vertex_a],
+                    mesh.uvs[vertex_a],
+                    mesh.normals[vertex_a]
+                );
+                const auto varying_b = shader.vertex(
+                    mesh.positions[vertex_b],
+                    mesh.uvs[vertex_b],
+                    mesh.normals[vertex_b]
+                );
+                const auto varying_c = shader.vertex(
+                    mesh.positions[vertex_c],
+                    mesh.uvs[vertex_c],
+                    mesh.normals[vertex_c]
+                );
                 const auto clipped = guard_band_test
                     ? clip_triangle_guard_band(shader, varying_a, varying_b, varying_c, 2.0F)
                     : clip_triangle(shader, varying_a, varying_b, varying_c);
@@ -364,9 +453,21 @@ namespace raster::render {
                 const auto vertex_a = static_cast<std::size_t>(mesh.indices[index_base]);
                 const auto vertex_b = static_cast<std::size_t>(mesh.indices[index_base + 1U]);
                 const auto vertex_c = static_cast<std::size_t>(mesh.indices[index_base + 2U]);
-                const auto varying_a = shader.vertex(mesh.positions[vertex_a], mesh.uvs[vertex_a]);
-                const auto varying_b = shader.vertex(mesh.positions[vertex_b], mesh.uvs[vertex_b]);
-                const auto varying_c = shader.vertex(mesh.positions[vertex_c], mesh.uvs[vertex_c]);
+                const auto varying_a = shader.vertex(
+                    mesh.positions[vertex_a],
+                    mesh.uvs[vertex_a],
+                    mesh.normals[vertex_a]
+                );
+                const auto varying_b = shader.vertex(
+                    mesh.positions[vertex_b],
+                    mesh.uvs[vertex_b],
+                    mesh.normals[vertex_b]
+                );
+                const auto varying_c = shader.vertex(
+                    mesh.positions[vertex_c],
+                    mesh.uvs[vertex_c],
+                    mesh.normals[vertex_c]
+                );
                 const auto clipped = guard_band_test
                     ? clip_triangle_guard_band(shader, varying_a, varying_b, varying_c, 2.0F)
                     : clip_triangle(shader, varying_a, varying_b, varying_c);
@@ -439,10 +540,12 @@ namespace raster::render {
                 framebuffer.depth_view(),
                 [&](std::size_t quad_x, std::size_t quad_y, const QuadBarycentrics& quad) noexcept {
                 std::array<Vec2f, 4> quad_uv{};
+                std::array<Vec3f, 4> quad_normal{};
                 for (const auto lane : std::views::iota(std::size_t{0}, std::size_t{4})) {
                     const auto attributes =
                         shader.interpolate(varying_a, varying_b, varying_c, quad.lanes[lane]);
                     quad_uv[lane] = std::get<0>(attributes);
+                    quad_normal[lane] = std::get<1>(attributes);
                 }
 
                 const auto derivatives = quad_derivatives(quad_uv);
@@ -451,7 +554,17 @@ namespace raster::render {
                     shader.uniforms.texture->width(),
                     shader.uniforms.texture->height()
                 );
-                store_shaded_quad(color, shader, varying_a, quad_x, quad_y, quad, quad_uv, lod);
+                store_shaded_quad(
+                    color,
+                    shader,
+                    varying_a,
+                    quad_x,
+                    quad_y,
+                    quad,
+                    quad_uv,
+                    quad_normal,
+                    lod
+                );
             },
                 region
             );
@@ -699,6 +812,9 @@ namespace raster::render {
         shader.uniforms.model_view_projection = projection * view;
         shader.uniforms.texture = &texture;
         shader.uniforms.solid_color_debug = solid_color_debug;
+        shader.uniforms.sun_direction = normalize(Vec3f{.x = 0.0F, .y = 3.0F, .z = 4.0F});
+        shader.uniforms.ambient = 0.4F;
+        shader.uniforms.sun_scale = 0.6F;
         if (tile_state != nullptr) {
             if (!draw_tiled_mesh(
                     framebuffer,

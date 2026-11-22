@@ -251,6 +251,82 @@ namespace {
             REQUIRE(wide == reference);
         }
     }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE("wide light application matches scalar exactly", "[simd][light]") {
+        DeterministicRng rng{};
+        for (std::size_t trial = 0; trial < 512U; ++trial) {
+            std::array<float, 4> red{};
+            std::array<float, 4> green{};
+            std::array<float, 4> blue{};
+            std::array<float, 4> nx{};
+            std::array<float, 4> ny{};
+            std::array<float, 4> nz{};
+            for (std::size_t lane = 0; lane < 4U; ++lane) {
+                red[lane] = rng.range(0.0F, 1.0F);
+                green[lane] = rng.range(0.0F, 1.0F);
+                blue[lane] = rng.range(0.0F, 1.0F);
+                // Include zero, near-zero, and unit normals alongside randoms.
+                const auto pick = trial % 5U;
+                if (pick == 0U && lane == 0U) {
+                    nx[lane] = 0.0F;
+                    ny[lane] = 0.0F;
+                    nz[lane] = 0.0F;
+                } else if (pick == 1U && lane == 1U) {
+                    nx[lane] = 1e-20F;
+                    ny[lane] = 0.0F;
+                    nz[lane] = 0.0F;
+                } else if (pick == 2U) {
+                    nx[lane] = 0.0F;
+                    ny[lane] = 0.6F;
+                    nz[lane] = 0.8F;
+                } else {
+                    nx[lane] = rng.range(-1.0F, 1.0F);
+                    ny[lane] = rng.range(-1.0F, 1.0F);
+                    nz[lane] = rng.range(-1.0F, 1.0F);
+                }
+            }
+            constexpr float sun_x = 0.0F;
+            constexpr float sun_y = 0.6F;
+            constexpr float sun_z = 0.8F;
+            constexpr float ambient = 0.4F;
+            constexpr float sun_scale = 0.6F;
+            std::array<float, 4> out_red{};
+            std::array<float, 4> out_green{};
+            std::array<float, 4> out_blue{};
+            raster::simd::apply_light4(
+                red.data(),
+                green.data(),
+                blue.data(),
+                nx.data(),
+                ny.data(),
+                nz.data(),
+                sun_x,
+                sun_y,
+                sun_z,
+                ambient,
+                sun_scale,
+                out_red.data(),
+                out_green.data(),
+                out_blue.data()
+            );
+            for (std::size_t lane = 0; lane < 4U; ++lane) {
+                const auto dot_nn = nx[lane] * nx[lane] + ny[lane] * ny[lane] + nz[lane] * nz[lane];
+                const auto len = std::sqrt(dot_nn);
+                // NOTE: scalar division n/len rewritten as n*(1/len) is NOT
+                // bit-identical; the reference below must use division to
+                // match both the shader and the wide helper.
+                const auto hx = len == 0.0F ? 0.0F : nx[lane] / len;
+                const auto hy = len == 0.0F ? 0.0F : ny[lane] / len;
+                const auto hz = len == 0.0F ? 0.0F : nz[lane] / len;
+                const auto diffuse = std::max(hx * sun_x + hy * sun_y + hz * sun_z, 0.0F);
+                const auto gain = ambient + diffuse * sun_scale;
+                REQUIRE(out_red[lane] == red[lane] * gain);
+                REQUIRE(out_green[lane] == green[lane] * gain);
+                REQUIRE(out_blue[lane] == blue[lane] * gain);
+            }
+        }
+    }
 } // namespace
 
 #if defined(__clang__)

@@ -24,6 +24,7 @@
 #include <cstring>
 #else
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #endif
 
@@ -209,6 +210,54 @@ namespace raster::simd {
         static_assert(sizeof(packed) == 4U * sizeof(std::uint32_t));
         std::memcpy(out, &packed, sizeof(packed));
     }
+
+    // Four-lane ambient + Lambertian diffuse, matching FloorShader::shade_lit
+    // exactly: normalize via sqrt + per-component divide (zero stays zero),
+    // max against +0, gain, then per-channel multiply — same operation order.
+    inline void apply_light4(
+        const float* red,
+        const float* green,
+        const float* blue,
+        const float* nx,
+        const float* ny,
+        const float* nz,
+        float sun_x,
+        float sun_y,
+        float sun_z,
+        float ambient,
+        float sun_scale,
+        float* out_red,
+        float* out_green,
+        float* out_blue
+    ) noexcept {
+        const __m128 zero = _mm_setzero_ps();
+        const __m128 vx = _mm_loadu_ps(nx);
+        const __m128 vy = _mm_loadu_ps(ny);
+        const __m128 vz = _mm_loadu_ps(nz);
+        const __m128 dot_nn =
+            _mm_add_ps(_mm_add_ps(_mm_mul_ps(vx, vx), _mm_mul_ps(vy, vy)), _mm_mul_ps(vz, vz));
+
+        const __m128 len = _mm_sqrt_ps(dot_nn);
+        const __m128 nonzero = _mm_cmpneq_ps(len, zero);
+        // Masked divide: zero lanes yield exactly +0, matching the scalar
+        // zero-vector branch; nonzero lanes keep the quotient untouched.
+        const __m128 hx = _mm_and_ps(_mm_div_ps(vx, len), nonzero);
+        const __m128 hy = _mm_and_ps(_mm_div_ps(vy, len), nonzero);
+        const __m128 hz = _mm_and_ps(_mm_div_ps(vz, len), nonzero);
+        const __m128 diffuse = _mm_max_ps(
+            _mm_add_ps(
+                _mm_add_ps(_mm_mul_ps(hx, _mm_set1_ps(sun_x)), _mm_mul_ps(hy, _mm_set1_ps(sun_y))),
+                _mm_mul_ps(hz, _mm_set1_ps(sun_z))
+            ),
+            zero
+        );
+
+        const __m128 gain =
+            _mm_add_ps(_mm_set1_ps(ambient), _mm_mul_ps(diffuse, _mm_set1_ps(sun_scale)));
+        _mm_storeu_ps(out_red, _mm_mul_ps(_mm_loadu_ps(red), gain));
+        _mm_storeu_ps(out_green, _mm_mul_ps(_mm_loadu_ps(green), gain));
+        _mm_storeu_ps(out_blue, _mm_mul_ps(_mm_loadu_ps(blue), gain));
+    }
 #else
     // Non-x86_64 fallback with identical semantics.
     inline void barycentric_weights8(
@@ -304,6 +353,37 @@ namespace raster::simd {
     ) noexcept {
         for (std::size_t index = 0; index < count; ++index) {
             out[index] = value;
+        }
+    }
+
+    inline void apply_light4(
+        const float* red,
+        const float* green,
+        const float* blue,
+        const float* nx,
+        const float* ny,
+        const float* nz,
+        float sun_x,
+        float sun_y,
+        float sun_z,
+        float ambient,
+        float sun_scale,
+        float* out_red,
+        float* out_green,
+        float* out_blue
+    ) noexcept {
+        for (std::size_t lane = 0; lane < 4U; ++lane) {
+            const auto dot_nn = nx[lane] * nx[lane] + ny[lane] * ny[lane] + nz[lane] * nz[lane];
+            const auto len = std::sqrt(dot_nn);
+            const auto hx = len == 0.0F ? 0.0F : nx[lane] / len;
+            const auto hy = len == 0.0F ? 0.0F : ny[lane] / len;
+            const auto hz = len == 0.0F ? 0.0F : nz[lane] / len;
+            const auto diffuse = std::max(hx * sun_x + hy * sun_y + hz * sun_z, 0.0F);
+            const auto gain = ambient + diffuse * sun_scale;
+
+            out_red[lane] = red[lane] * gain;
+            out_green[lane] = green[lane] * gain;
+            out_blue[lane] = blue[lane] * gain;
         }
     }
 #endif
