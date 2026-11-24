@@ -136,6 +136,51 @@ namespace {
 
     // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
     TEST_CASE(
+        "conservative clip-frustum reject keeps straddling and invalid triangles", "[clipper][cull]"
+    ) {
+        constexpr std::array<raster::Vec4f, raster::clip_plane_count> outside_points{
+            raster::Vec4f{.x = -2.0F, .y = 0.0F, .z = 0.5F, .w = 1.0F},
+            raster::Vec4f{.x = 2.0F, .y = 0.0F, .z = 0.5F, .w = 1.0F},
+            raster::Vec4f{.x = 0.0F, .y = -2.0F, .z = 0.5F, .w = 1.0F},
+            raster::Vec4f{.x = 0.0F, .y = 2.0F, .z = 0.5F, .w = 1.0F},
+            raster::Vec4f{.x = 0.0F, .y = 0.0F, .z = -0.5F, .w = 1.0F},
+            raster::Vec4f{.x = 0.0F, .y = 0.0F, .z = 1.5F, .w = 1.0F},
+        };
+        for (const auto& outside : outside_points) {
+            REQUIRE(raster::triangle_outside_clip_frustum({outside, outside, outside}));
+        }
+
+        constexpr std::array<raster::Vec4f, 3> straddling_right{
+            raster::Vec4f{.x = 0.5F, .y = -0.5F, .z = 0.5F, .w = 1.0F},
+            raster::Vec4f{.x = 1.5F, .y = -0.5F, .z = 0.5F, .w = 1.0F},
+            raster::Vec4f{.x = 0.5F, .y = 0.5F, .z = 0.5F, .w = 1.0F},
+        };
+        REQUIRE_FALSE(raster::triangle_outside_clip_frustum(straddling_right));
+        REQUIRE_FALSE(raster::triangle_outside_clip_frustum(straddling_right, 2.0F));
+
+        constexpr std::array<raster::Vec4f, 3> guard_band_only{
+            raster::Vec4f{.x = 1.5F, .y = -0.5F, .z = 0.5F, .w = 1.0F},
+            raster::Vec4f{.x = 1.75F, .y = -0.5F, .z = 0.5F, .w = 1.0F},
+            raster::Vec4f{.x = 1.5F, .y = 0.5F, .z = 0.5F, .w = 1.0F},
+        };
+        REQUIRE(raster::triangle_outside_clip_frustum(guard_band_only));
+        REQUIRE_FALSE(raster::triangle_outside_clip_frustum(guard_band_only, 2.0F));
+
+        constexpr std::array<raster::Vec4f, 3> non_finite{
+            raster::Vec4f{.x = 2.0F, .y = 0.0F, .z = 0.5F, .w = 1.0F},
+            raster::Vec4f{
+                .x = std::numeric_limits<float>::infinity(),
+                .y = 0.0F,
+                .z = 0.5F,
+                .w = 1.0F,
+            },
+            raster::Vec4f{.x = 2.0F, .y = 1.0F, .z = 0.5F, .w = 1.0F},
+        };
+        REQUIRE_FALSE(raster::triangle_outside_clip_frustum(non_finite));
+    }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE(
         "clipper intersects a left plane and interpolates varyings", "[clipper][intersection]"
     ) {
         constexpr ClipTestShader shader{};

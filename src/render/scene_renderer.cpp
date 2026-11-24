@@ -623,7 +623,8 @@ namespace raster::render {
             Framebuffer& framebuffer,
             FloorShader<Layout>& shader,
             const SoAMesh& mesh,
-            bool guard_band_test
+            bool guard_band_test,
+            SceneRenderDiagnostics* diagnostics
         ) noexcept {
             for (const auto triangle_index :
                  std::views::iota(std::size_t{0}, mesh.triangle_count())) {
@@ -646,13 +647,38 @@ namespace raster::render {
                     mesh.uvs[vertex_c],
                     mesh.normals[vertex_c]
                 );
+                if (diagnostics != nullptr) {
+                    diagnostics->source_triangles.fetch_add(1U, std::memory_order_relaxed);
+                }
+
+                const std::array<Vec4f, 3> clip_positions{
+                    varying_a.clip_pos,
+                    varying_b.clip_pos,
+                    varying_c.clip_pos,
+                };
+                if (triangle_outside_clip_frustum(clip_positions, guard_band_test ? 2.0F : 1.0F)) {
+                    if (diagnostics != nullptr) {
+                        diagnostics->frustum_rejected_triangles.fetch_add(
+                            1U,
+                            std::memory_order_relaxed
+                        );
+                    }
+                    continue;
+                }
                 const auto clipped = guard_band_test
                     ? clip_triangle_guard_band(shader, varying_a, varying_b, varying_c, 2.0F)
                     : clip_triangle(shader, varying_a, varying_b, varying_c);
                 if (!clipped) {
                     return false;
                 }
+                if (diagnostics != nullptr) {
+                    diagnostics->clipped_triangles.fetch_add(1U, std::memory_order_relaxed);
+                }
                 for (const auto& triangle : clipped->active_triangles()) {
+                    if (diagnostics != nullptr) {
+                        diagnostics->prepared_triangles.fetch_add(1U, std::memory_order_relaxed);
+                    }
+
                     draw_mesh_triangle(
                         framebuffer,
                         shader,
@@ -660,6 +686,12 @@ namespace raster::render {
                         triangle.vertices[1],
                         triangle.vertices[2]
                     );
+                    if (diagnostics != nullptr) {
+                        diagnostics->rasterized_triangle_submissions.fetch_add(
+                            1U,
+                            std::memory_order_relaxed
+                        );
+                    }
                 }
             }
             return true;
@@ -679,7 +711,8 @@ namespace raster::render {
             bool guard_band_test,
             std::size_t begin_triangle,
             std::size_t end_triangle,
-            std::vector<PreparedTriangle<Layout>>& prepared
+            std::vector<PreparedTriangle<Layout>>& prepared,
+            SceneRenderDiagnostics* diagnostics
         ) noexcept {
             prepared.clear();
             for (const auto triangle_index :
@@ -703,11 +736,33 @@ namespace raster::render {
                     mesh.uvs[vertex_c],
                     mesh.normals[vertex_c]
                 );
+                if (diagnostics != nullptr) {
+                    diagnostics->source_triangles.fetch_add(1U, std::memory_order_relaxed);
+                }
+
+                const std::array<Vec4f, 3> clip_positions{
+                    varying_a.clip_pos,
+                    varying_b.clip_pos,
+                    varying_c.clip_pos,
+                };
+                if (triangle_outside_clip_frustum(clip_positions, guard_band_test ? 2.0F : 1.0F)) {
+                    if (diagnostics != nullptr) {
+                        diagnostics->frustum_rejected_triangles.fetch_add(
+                            1U,
+                            std::memory_order_relaxed
+                        );
+                    }
+                    continue;
+                }
+
                 const auto clipped = guard_band_test
                     ? clip_triangle_guard_band(shader, varying_a, varying_b, varying_c, 2.0F)
                     : clip_triangle(shader, varying_a, varying_b, varying_c);
                 if (!clipped) {
                     return false;
+                }
+                if (diagnostics != nullptr) {
+                    diagnostics->clipped_triangles.fetch_add(1U, std::memory_order_relaxed);
                 }
                 for (const auto& clipped_triangle : clipped->active_triangles()) {
                     const std::array<typename FloorShader<Layout>::Varyings, 3> vertices{
@@ -748,6 +803,16 @@ namespace raster::render {
                         reverse_z
                     );
                     if (setup) {
+                        if (diagnostics != nullptr) {
+                            diagnostics->prepared_triangles.fetch_add(
+                                1U,
+                                std::memory_order_relaxed
+                            );
+                            diagnostics->rasterized_triangle_submissions.fetch_add(
+                                1U,
+                                std::memory_order_relaxed
+                            );
+                        }
                         prepared.push_back(
                             PreparedTriangle<Layout>{.setup = *setup, .vertices = vertices}
                         );
@@ -871,7 +936,8 @@ namespace raster::render {
             ShadowMap& shadow,
             FloorShader<Layout>& light_shader,
             const SoAMesh& mesh,
-            std::vector<PreparedTriangle<Layout>>& scratch
+            std::vector<PreparedTriangle<Layout>>& scratch,
+            SceneRenderDiagnostics* diagnostics
         ) noexcept {
             static const bool profile =
                 SDL_GetEnvironmentVariable(SDL_GetEnvironment(), "RASTER_PROFILE") != nullptr;
@@ -884,7 +950,8 @@ namespace raster::render {
                     false,
                     0U,
                     mesh.triangle_count(),
-                    scratch
+                    scratch,
+                    diagnostics
                 )) {
                 return false;
             }
@@ -935,7 +1002,8 @@ namespace raster::render {
             const SoAMesh& mesh,
             bool guard_band_test,
             TileRenderState<Layout>& tile_state,
-            bool allow_allocation
+            bool allow_allocation,
+            SceneRenderDiagnostics* diagnostics
         ) noexcept {
             const auto width = framebuffer.width;
             const auto height = framebuffer.height;
@@ -966,7 +1034,8 @@ namespace raster::render {
                         guard_band_test,
                         begin,
                         end,
-                        chunk
+                        chunk,
+                        diagnostics
                     )) {
                     prepared_ok.store(false, std::memory_order_relaxed);
                 }
@@ -1068,8 +1137,13 @@ namespace raster::render {
         const pbr::Material& material,
         bool draw_overlay,
         TileRenderState<Layout>* tile_state = nullptr,
-        const Texture2D<Layout>* metallic_roughness = nullptr
+        const Texture2D<Layout>* metallic_roughness = nullptr,
+        SceneRenderDiagnostics* diagnostics = nullptr
     ) noexcept {
+        if (diagnostics != nullptr) {
+            diagnostics->reset();
+        }
+
         const auto width = framebuffer.width;
         const auto height = framebuffer.height;
         if (width < 2U || height < 2U) {
@@ -1185,12 +1259,15 @@ namespace raster::render {
             SDL_GetEnvironmentVariable(SDL_GetEnvironment(), "RASTER_NO_SHADOW") == nullptr;
         if (tile_state != nullptr) {
             shader.uniforms.shadow_map = shadows_enabled ? &tile_state->shadow_map : nullptr;
+            // Keep diagnostics scoped to the visible camera pass; the shadow
+            // pass uses a different projection and its own preparation path.
             if (shadows_enabled
                 && !render_shadow_map(
                     tile_state->shadow_map,
                     light_shader,
                     mesh,
-                    tile_state->shadow_prepared
+                    tile_state->shadow_prepared,
+                    nullptr
                 )) {
                 return false;
             }
@@ -1200,7 +1277,8 @@ namespace raster::render {
                     mesh,
                     guard_band_test,
                     *tile_state,
-                    !clip_stress_test || elapsed_ns == 0U
+                    !clip_stress_test || elapsed_ns == 0U,
+                    diagnostics
                 )) {
                 return false;
             }
@@ -1209,10 +1287,16 @@ namespace raster::render {
             thread_local std::vector<PreparedTriangle<Layout>> serial_shadow_prepared{};
             shader.uniforms.shadow_map = shadows_enabled ? &serial_shadow : nullptr;
             if (shadows_enabled
-                && !render_shadow_map(serial_shadow, light_shader, mesh, serial_shadow_prepared)) {
+                && !render_shadow_map(
+                    serial_shadow,
+                    light_shader,
+                    mesh,
+                    serial_shadow_prepared,
+                    nullptr
+                )) {
                 return false;
             }
-            if (!draw_mesh(framebuffer, shader, mesh, guard_band_test)) {
+            if (!draw_mesh(framebuffer, shader, mesh, guard_band_test, diagnostics)) {
                 return false;
             }
         }
@@ -1254,7 +1338,8 @@ namespace raster::render {
         const FreeLookCamera& camera,
         SceneShading shading,
         const pbr::Material& material,
-        const Texture2D<LayoutTiled4x4>* metallic_roughness
+        const Texture2D<LayoutTiled4x4>* metallic_roughness,
+        SceneRenderDiagnostics* diagnostics
     ) noexcept {
         return render_scene_impl<LayoutTiled4x4>(
             framebuffer,
@@ -1270,7 +1355,8 @@ namespace raster::render {
             material,
             true,
             nullptr,
-            metallic_roughness
+            metallic_roughness,
+            diagnostics
         );
     }
 
@@ -1293,7 +1379,8 @@ namespace raster::render {
         const FreeLookCamera& camera,
         SceneShading shading,
         const pbr::Material& material,
-        const Texture2D<LayoutTiled4x4>* metallic_roughness
+        const Texture2D<LayoutTiled4x4>* metallic_roughness,
+        SceneRenderDiagnostics* diagnostics
     ) noexcept {
         return render_scene_impl(
             framebuffer,
@@ -1309,7 +1396,8 @@ namespace raster::render {
             material,
             true,
             impl_.get(),
-            metallic_roughness
+            metallic_roughness,
+            diagnostics
         );
     }
 

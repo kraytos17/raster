@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <memory>
 
@@ -12,6 +13,22 @@
 #include "raster/pipeline/pbr.hpp"
 
 namespace raster::render {
+    struct SceneRenderDiagnostics {
+        std::atomic_size_t source_triangles{};
+        std::atomic_size_t frustum_rejected_triangles{};
+        std::atomic_size_t clipped_triangles{};
+        std::atomic_size_t prepared_triangles{};
+        std::atomic_size_t rasterized_triangle_submissions{};
+
+        void reset() noexcept {
+            source_triangles.store(0U, std::memory_order_relaxed);
+            frustum_rejected_triangles.store(0U, std::memory_order_relaxed);
+            clipped_triangles.store(0U, std::memory_order_relaxed);
+            prepared_triangles.store(0U, std::memory_order_relaxed);
+            rasterized_triangle_submissions.store(0U, std::memory_order_relaxed);
+        }
+    };
+
     // Diffuse preserves the legacy byte-oriented path. Pbr requires an Srgb
     // base-color texture; material holds linear-light factors. An optional
     // metallic-roughness texture carries linear data (G = roughness,
@@ -59,7 +76,8 @@ namespace raster::render {
             const FreeLookCamera& camera,
             SceneShading shading = SceneShading::Diffuse,
             const pbr::Material& material = pbr::Material(),
-            const Texture2D<LayoutTiled4x4>* metallic_roughness = nullptr
+            const Texture2D<LayoutTiled4x4>* metallic_roughness = nullptr,
+            SceneRenderDiagnostics* diagnostics = nullptr
         ) noexcept;
 
     private:
@@ -84,7 +102,8 @@ namespace raster::render {
         const FreeLookCamera& camera,
         SceneShading shading = SceneShading::Diffuse,
         const pbr::Material& material = pbr::Material(),
-        const Texture2D<LayoutTiled4x4>* metallic_roughness = nullptr
+        const Texture2D<LayoutTiled4x4>* metallic_roughness = nullptr,
+        SceneRenderDiagnostics* diagnostics = nullptr
     ) noexcept;
 
     [[nodiscard]]

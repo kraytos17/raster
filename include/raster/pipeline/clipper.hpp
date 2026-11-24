@@ -180,6 +180,28 @@ namespace raster {
         }
     } // namespace detail
 
+    // A triangle is safely outside the canonical clip volume only when all
+    // three vertices lie beyond the same plane.
+    [[nodiscard]]
+    inline bool triangle_outside_clip_frustum(
+        const std::array<Vec4f, 3>& clip_positions, float guard_band = 1.0F
+    ) noexcept {
+        if (!std::isfinite(guard_band) || guard_band < 1.0F) {
+            return false;
+        }
+
+        auto common_outcode = static_cast<std::uint8_t>((1U << clip_plane_count) - 1U);
+        for (const auto& position : clip_positions) {
+            if (!detail::finite(position)) {
+                return false;
+            }
+            common_outcode = static_cast<std::uint8_t>(
+                common_outcode & detail::clip_outcode(position, guard_band)
+            );
+        }
+        return common_outcode != 0U;
+    }
+
     // Six-plane homogeneous Sutherland-Hodgman clipping. Every edge intersection
     // interpolates clip position and all ShaderBase-tied varyings in homogeneous space before
     // any perspective divide. Scratch storage and triangle-fan output are

@@ -11,7 +11,6 @@
 #include <optional>
 #include <ranges>
 #include <SDL3/SDL.h>
-#include <span>
 #include <tuple>
 #include <vector>
 
@@ -87,6 +86,201 @@ namespace {
         REQUIRE(tiled.color_storage == serial.color_storage);
         REQUIRE(tiled.depth_storage == serial.depth_storage);
         REQUIRE(allocation_count == 0U);
+    }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE("fully offscreen mesh writes no color or depth lanes", "[scene][m3][frustum]") {
+        constexpr std::size_t width = 80U;
+        constexpr std::size_t height = 64U;
+        raster::SoAMesh offscreen{};
+        offscreen.positions = {
+            raster::Vec3f{.x = 1000.0F, .y = 0.0F, .z = -2.0F},
+            raster::Vec3f{.x = 1001.0F, .y = 0.0F, .z = -2.0F},
+            raster::Vec3f{.x = 1000.0F, .y = 1.0F, .z = -2.0F},
+        };
+        offscreen.normals = {
+            raster::Vec3f{.x = 0.0F, .y = 0.0F, .z = 1.0F},
+            raster::Vec3f{.x = 0.0F, .y = 0.0F, .z = 1.0F},
+            raster::Vec3f{.x = 0.0F, .y = 0.0F, .z = 1.0F},
+        };
+        offscreen.uvs = {
+            raster::Vec2f{.x = 0.0F, .y = 0.0F},
+            raster::Vec2f{.x = 1.0F, .y = 0.0F},
+            raster::Vec2f{.x = 0.0F, .y = 1.0F},
+        };
+        offscreen.indices = {0U, 1U, 2U};
+        REQUIRE(offscreen.has_consistent_vertex_streams());
+
+        raster::TgaImage image{};
+        image.width = 1U;
+        image.height = 1U;
+        image.pixels = {0xFFFFFFFFU};
+        const raster::Texture2D<raster::LayoutTiled4x4> texture{image};
+        const raster::render::FreeLookCamera camera{
+            .position = raster::Vec3f{.x = 0.0F, .y = 0.0F, .z = 3.5F},
+            .yaw = 0.0F,
+            .pitch = 0.0F,
+        };
+        constexpr std::uint32_t clear = 0xFF101018U;
+        raster::Framebuffer serial{width, height};
+        raster::Framebuffer framebuffer{width, height};
+        raster::render::TileRenderer renderer{3U};
+        raster::render::SceneRenderDiagnostics serial_diagnostics{};
+        raster::render::SceneRenderDiagnostics tiled_diagnostics{};
+        REQUIRE(
+            raster::render::render_scene(
+                serial,
+                offscreen,
+                0U,
+                false,
+                true,
+                false,
+                false,
+                texture,
+                camera,
+                raster::render::SceneShading::Diffuse,
+                raster::pbr::Material(),
+                nullptr,
+                &serial_diagnostics
+            )
+        );
+        REQUIRE(renderer.render_scene(
+            framebuffer,
+            offscreen,
+            0U,
+            false,
+            true,
+            false,
+            false,
+            texture,
+            camera,
+            raster::render::SceneShading::Diffuse,
+            raster::pbr::Material(),
+            nullptr,
+            &tiled_diagnostics
+        ));
+        const auto verify_early_reject = [](const raster::render::SceneRenderDiagnostics& stats) {
+            REQUIRE(stats.source_triangles == 1U);
+            REQUIRE(stats.frustum_rejected_triangles == 1U);
+            REQUIRE(stats.clipped_triangles == 0U);
+            REQUIRE(stats.prepared_triangles == 0U);
+            REQUIRE(stats.rasterized_triangle_submissions == 0U);
+        };
+        verify_early_reject(serial_diagnostics);
+        verify_early_reject(tiled_diagnostics);
+
+        const auto color = std::as_const(framebuffer).color_view();
+        const auto depth = std::as_const(framebuffer).depth_view();
+        const auto serial_color = std::as_const(serial).color_view();
+        const auto serial_depth = std::as_const(serial).depth_view();
+        std::size_t non_clear_pixels = 0U;
+        std::size_t written_depths = 0U;
+        std::size_t serial_non_clear_pixels = 0U;
+        std::size_t serial_written_depths = 0U;
+        for (std::size_t y = 0U; y < height; ++y) {
+            for (std::size_t x = 0U; x < width; ++x) {
+                non_clear_pixels += color[y, x] != clear ? 1U : 0U;
+                written_depths += depth[y, x] != 0.0F ? 1U : 0U;
+                serial_non_clear_pixels += serial_color[y, x] != clear ? 1U : 0U;
+                serial_written_depths += serial_depth[y, x] != 0.0F ? 1U : 0U;
+            }
+        }
+        REQUIRE(non_clear_pixels == 0U);
+        REQUIRE(written_depths == 0U);
+        REQUIRE(serial_non_clear_pixels == 0U);
+        REQUIRE(serial_written_depths == 0U);
+        REQUIRE(framebuffer.color_storage == serial.color_storage);
+        REQUIRE(framebuffer.depth_storage == serial.depth_storage);
+    }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE("frustum cull retains triangle crossing the view boundary", "[scene][m3][frustum]") {
+        constexpr std::size_t width = 80U;
+        constexpr std::size_t height = 64U;
+        raster::SoAMesh boundary{};
+        boundary.positions = {
+            raster::Vec3f{.x = 3.0F, .y = -2.0F, .z = -2.0F},
+            raster::Vec3f{.x = 6.0F, .y = -2.0F, .z = -2.0F},
+            raster::Vec3f{.x = 3.0F, .y = 2.0F, .z = -2.0F},
+        };
+        const raster::Vec3f normal{.x = 0.0F, .y = 0.0F, .z = 1.0F};
+        boundary.normals = {normal, normal, normal};
+        boundary.uvs = {
+            raster::Vec2f{.x = 0.0F, .y = 0.0F},
+            raster::Vec2f{.x = 1.0F, .y = 0.0F},
+            raster::Vec2f{.x = 0.0F, .y = 1.0F},
+        };
+        boundary.indices = {0U, 1U, 2U};
+
+        raster::TgaImage image{};
+        image.width = 1U;
+        image.height = 1U;
+        image.pixels = {0xFFFFFFFFU};
+        const raster::Texture2D<raster::LayoutTiled4x4> texture{image};
+        const raster::render::FreeLookCamera camera{
+            .position = raster::Vec3f{.x = 0.0F, .y = 0.0F, .z = 3.5F},
+            .yaw = 0.0F,
+            .pitch = 0.0F,
+        };
+        raster::Framebuffer serial{width, height};
+        raster::Framebuffer tiled{width, height};
+        raster::render::TileRenderer renderer{3U};
+        raster::render::SceneRenderDiagnostics serial_diagnostics{};
+        raster::render::SceneRenderDiagnostics tiled_diagnostics{};
+        REQUIRE(
+            raster::render::render_scene(
+                serial,
+                boundary,
+                0U,
+                false,
+                true,
+                false,
+                false,
+                texture,
+                camera,
+                raster::render::SceneShading::Diffuse,
+                raster::pbr::Material(),
+                nullptr,
+                &serial_diagnostics
+            )
+        );
+        REQUIRE(renderer.render_scene(
+            tiled,
+            boundary,
+            0U,
+            false,
+            true,
+            false,
+            false,
+            texture,
+            camera,
+            raster::render::SceneShading::Diffuse,
+            raster::pbr::Material(),
+            nullptr,
+            &tiled_diagnostics
+        ));
+
+        REQUIRE(serial_diagnostics.source_triangles == 1U);
+        REQUIRE(serial_diagnostics.frustum_rejected_triangles == 0U);
+        REQUIRE(serial_diagnostics.clipped_triangles == 1U);
+        REQUIRE(serial_diagnostics.prepared_triangles > 0U);
+        REQUIRE(serial_diagnostics.rasterized_triangle_submissions > 0U);
+        REQUIRE(tiled_diagnostics.frustum_rejected_triangles == 0U);
+        REQUIRE(tiled_diagnostics.clipped_triangles == 1U);
+        REQUIRE(tiled_diagnostics.prepared_triangles > 0U);
+        REQUIRE(tiled_diagnostics.rasterized_triangle_submissions > 0U);
+        REQUIRE(serial.color_storage == tiled.color_storage);
+        REQUIRE(serial.depth_storage == tiled.depth_storage);
+
+        const auto colors = std::as_const(serial).color_view();
+        const auto depths = std::as_const(serial).depth_view();
+        std::size_t visible_pixels = 0U;
+        for (std::size_t y = 0U; y < height; ++y) {
+            for (std::size_t x = 0U; x < width; ++x) {
+                visible_pixels += depths[y, x] > 0.0F && colors[y, x] != 0xFF101018U ? 1U : 0U;
+            }
+        }
+        REQUIRE(visible_pixels > 20U);
     }
 
     // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
