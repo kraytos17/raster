@@ -145,6 +145,7 @@ if(RASTER_BUILD_TESTS)
         tests/test_material_loader.cpp
         tests/test_rasterizer.cpp
         tests/test_scene.cpp
+        tests/test_scene_chunks.cpp
         tests/test_simd.cpp
         tests/test_texture.cpp
         tests/test_shader.cpp

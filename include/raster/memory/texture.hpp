@@ -137,6 +137,21 @@ namespace raster {
             const auto low_level = static_cast<std::size_t>(std::floor(clamped_lod));
             const auto high_level = std::min(low_level + 1U, levels_.size() - 1U);
             const auto fraction = clamped_lod - static_cast<float>(low_level);
+            // Clamped at the smallest mip, both levels are the same object and
+            // the fraction is zero, so one bilinear sample is the mix result.
+            if (low_level == high_level) {
+                if (color_space_ == TextureColorSpace::Srgb) {
+                    const auto low = sample_bilinear_linear(u, v, low_level);
+                    const std::array<float, 4> encoded{
+                        linear_to_srgb(low[0]) * 255.0F,
+                        linear_to_srgb(low[1]) * 255.0F,
+                        linear_to_srgb(low[2]) * 255.0F,
+                        low[3] * 255.0F,
+                    };
+                    return pack_channels(encoded);
+                }
+                return pack_channels(sample_bilinear_channels(u, v, low_level));
+            }
             if (color_space_ == TextureColorSpace::Srgb) {
                 const auto low = sample_bilinear_linear(u, v, low_level);
                 const auto high = sample_bilinear_linear(u, v, high_level);
@@ -144,6 +159,7 @@ namespace raster {
                 const auto mix = [&](std::size_t channel) noexcept {
                     return low[channel] + (high[channel] - low[channel]) * fraction;
                 };
+
                 encoded[0] = linear_to_srgb(mix(0U)) * 255.0F;
                 encoded[1] = linear_to_srgb(mix(1U)) * 255.0F;
                 encoded[2] = linear_to_srgb(mix(2U)) * 255.0F;
@@ -170,6 +186,18 @@ namespace raster {
             const auto high_level = std::min(low_level + 1U, levels_.size() - 1U);
             const auto fraction = clamped_lod - static_cast<float>(low_level);
             const auto low = sample_bilinear_linear(u, v, low_level);
+            if (low_level == high_level) {
+                return Vec4f{
+                    // Packed texels are 0xAARRGGBB, so the filtered byte
+                    // channels are B,G,R,A while the public vector contract
+                    // is R,G,B,A.
+                    .x = low[2],
+                    .y = low[1],
+                    .z = low[0],
+                    .w = low[3],
+                };
+            }
+
             const auto high = sample_bilinear_linear(u, v, high_level);
             return Vec4f{
                 // Packed texels are 0xAARRGGBB, so the filtered byte channels
@@ -225,6 +253,7 @@ namespace raster {
             std::array<std::array<float, 4>, 3> high_v11{};
             std::array<float, 4> high_fx{};
             std::array<float, 4> high_fy{};
+            const bool single_level = (low_level == high_level);
             for (std::size_t lane = 0; lane < 4U; ++lane) {
                 std::array<std::uint32_t, 4> low_corners{};
                 std::array<std::uint32_t, 4> high_corners{};
@@ -236,14 +265,20 @@ namespace raster {
                     low_fx[lane],
                     low_fy[lane]
                 );
-                gather_bilinear_corners(
-                    high_mip,
-                    u[lane],
-                    v[lane],
-                    high_corners,
-                    high_fx[lane],
-                    high_fy[lane]
-                );
+                if (single_level) {
+                    high_corners = low_corners;
+                    high_fx[lane] = low_fx[lane];
+                    high_fy[lane] = low_fy[lane];
+                } else {
+                    gather_bilinear_corners(
+                        high_mip,
+                        u[lane],
+                        v[lane],
+                        high_corners,
+                        high_fx[lane],
+                        high_fy[lane]
+                    );
+                }
                 for (std::size_t channel = 0; channel < 3U; ++channel) {
                     const auto shift = static_cast<std::uint32_t>(channel * 8U);
                     low_v00[channel][lane] = static_cast<float>((low_corners[0] >> shift) & 0xFFU);

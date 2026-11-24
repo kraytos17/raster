@@ -240,7 +240,9 @@ namespace raster::render {
                     light_shader,
                     mesh,
                     tile_state->shadow_prepared,
-                    nullptr
+                    nullptr,
+                    chunks,
+                    chunk_lod_reference
                 )) {
                 return false;
             }
@@ -267,7 +269,9 @@ namespace raster::render {
                     light_shader,
                     mesh,
                     serial_shadow_prepared,
-                    nullptr
+                    nullptr,
+                    chunks,
+                    chunk_lod_reference
                 )) {
                 return false;
             }

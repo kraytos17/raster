@@ -135,6 +135,72 @@ namespace {
     }
 
     // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE("clipper with shared outcodes matches the classic entry points", "[clipper][cull]") {
+        constexpr ClipTestShader shader{};
+        constexpr raster::Vec2f uv{};
+        constexpr raster::Vec3f color{};
+        const auto left_outside =
+            make_vertex(raster::Vec4f{.x = -2.0F, .y = 0.0F, .z = 0.5F, .w = 1.0F}, uv, color);
+        const auto inside_a =
+            make_vertex(raster::Vec4f{.x = 0.0F, .y = -0.5F, .z = 0.5F, .w = 1.0F}, uv, color);
+        const auto inside_b =
+            make_vertex(raster::Vec4f{.x = 0.5F, .y = 0.5F, .z = 0.75F, .w = 1.0F}, uv, color);
+        const auto codes = [&](const auto& vertex) {
+            return raster::detail::clip_outcode(vertex.clip_pos, 1.0F);
+        };
+
+        const auto straddling = raster::clip_triangle_impl_with_outcodes(
+            shader,
+            left_outside,
+            inside_a,
+            inside_b,
+            1.0F,
+            codes(left_outside),
+            codes(inside_a),
+            codes(inside_b)
+        );
+        const auto classic = raster::clip_triangle(shader, left_outside, inside_a, inside_b);
+        REQUIRE(straddling.has_value());
+        REQUIRE(classic.has_value());
+        REQUIRE(straddling->size == classic->size);
+        REQUIRE(straddling->size == 2U);
+        for (std::size_t triangle = 0U; triangle < straddling->size; ++triangle) {
+            for (std::size_t corner = 0U; corner < 3U; ++corner) {
+                REQUIRE(
+                    straddling->triangles[triangle].vertices[corner].clip_pos.x
+                    == classic->triangles[triangle].vertices[corner].clip_pos.x
+                );
+            }
+        }
+
+        const auto accepted = raster::clip_triangle_impl_with_outcodes(
+            shader,
+            inside_a,
+            inside_a,
+            inside_b,
+            1.0F,
+            codes(inside_a),
+            codes(inside_a),
+            codes(inside_b)
+        );
+        REQUIRE(accepted.has_value());
+        REQUIRE(accepted->size == 1U);
+
+        const auto rejected = raster::clip_triangle_impl_with_outcodes(
+            shader,
+            left_outside,
+            left_outside,
+            left_outside,
+            1.0F,
+            codes(left_outside),
+            codes(left_outside),
+            codes(left_outside)
+        );
+        REQUIRE(rejected.has_value());
+        REQUIRE(rejected->size == 0U);
+    }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
     TEST_CASE(
         "conservative clip-frustum reject keeps straddling and invalid triangles", "[clipper][cull]"
     ) {

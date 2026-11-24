@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <mdspan>
 #include <memory>
+#include <numbers>
 #include <print>
 #include <random>
 #include <ranges>
@@ -329,6 +330,100 @@ namespace {
             .pitch = -0.19F,
         };
         benchmark_thread_scaling(mesh, texture, width, height, camera, "grid stress", 1U, 3U);
+    }
+
+    void benchmark_scene_cull(
+        const raster::Texture2D<raster::LayoutTiled4x4>& texture,
+        std::size_t width,
+        std::size_t height,
+        std::size_t columns,
+        std::size_t triangles_per_chunk
+    ) {
+        const auto mesh =
+            raster::make_grid_mesh_tiled(columns, columns, 30.0F, -0.5F, -90.0F, 8.0F, 8U);
+        const auto chunks = raster::render::make_scene_chunks(mesh, triangles_per_chunk);
+        constexpr raster::render::FreeLookCamera facing{
+            .position = raster::Vec3f{.x = 0.0F, .y = 6.0F, .z = 6.0F},
+            .yaw = 0.0F,
+            .pitch = -0.19F,
+        };
+        constexpr raster::render::FreeLookCamera behind{
+            .position = raster::Vec3f{.x = 0.0F, .y = 6.0F, .z = 6.0F},
+            .yaw = std::numbers::pi_v<float>,
+            .pitch = -0.19F,
+        };
+        std::println(
+            "scene-cull: {} triangles in {} chunks at {}x{}",
+            mesh.triangle_count(),
+            chunks.size(),
+            width,
+            height
+        );
+
+        constexpr std::size_t warmups = 1U;
+        constexpr std::size_t measured = 5U;
+        raster::Framebuffer framebuffer{width, height};
+        raster::render::SceneRenderDiagnostics cull_stats{};
+        const auto time_render = [&](const raster::SoAMesh& target,
+                                     const raster::render::FreeLookCamera& camera,
+                                     std::span<const raster::render::SceneChunk> active_chunks,
+                                     const char* label) {
+            const auto render_once = [&] noexcept {
+                return raster::render::render_scene(
+                    framebuffer,
+                    target,
+                    0U,
+                    false,
+                    true,
+                    false,
+                    false,
+                    texture,
+                    camera,
+                    raster::render::SceneShading::Diffuse,
+                    raster::pbr::Material(),
+                    nullptr,
+                    &cull_stats,
+                    active_chunks,
+                    &camera.position
+                );
+            };
+
+            const auto median =
+                benchmark_frame_times(render_once, "scene-cull render failed", warmups, measured);
+            std::println(
+                "scene-cull {}: median {:.3f} ms/frame ({} runs) "
+                "[src={} rej_tri={} clipped={} prep={} submitted={} src_chunks={} "
+                "rej_chunks={}]",
+                label,
+                static_cast<double>(median) / 1.0e6,
+                measured,
+                cull_stats.source_triangles.load(),
+                cull_stats.frustum_rejected_triangles.load(),
+                cull_stats.clipped_triangles.load(),
+                cull_stats.prepared_triangles.load(),
+                cull_stats.rasterized_triangle_submissions.load(),
+                cull_stats.source_chunks.load(),
+                cull_stats.frustum_rejected_chunks.load()
+            );
+            return median;
+        };
+
+        const raster::SoAMesh empty{};
+        const auto clear_only = time_render(empty, facing, {}, "clear-only baseline");
+        const auto facing_plain = time_render(mesh, facing, {}, "facing unchunked");
+        const auto facing_chunked = time_render(mesh, facing, chunks, "facing chunked");
+        const auto behind_plain = time_render(mesh, behind, {}, "behind-camera unchunked");
+        const auto behind_chunked = time_render(mesh, behind, chunks, "behind-camera chunked");
+        std::println(
+            "scene-cull culled-away cost: unchunked {:.2f}x clear, chunked {:.2f}x clear "
+            "({} runs)",
+            static_cast<double>(behind_plain) / static_cast<double>(clear_only),
+            static_cast<double>(behind_chunked) / static_cast<double>(clear_only),
+            measured
+        );
+
+        static_cast<void>(facing_plain);
+        static_cast<void>(facing_chunked);
     }
 
     struct CompactHeapNode {
@@ -709,6 +804,8 @@ int main(int argc, char* argv[]) noexcept {
                 || first_argument
                 == "scene-stress"
                 || first_argument
+                == "scene-cull"
+                || first_argument
                 == "heap-aging"
             ? first_argument
             : std::string_view{"fetch"};
@@ -781,7 +878,9 @@ int main(int argc, char* argv[]) noexcept {
             || selected_mode
             == "scene-threads"
             || selected_mode
-            == "scene-stress") {
+            == "scene-stress"
+            || selected_mode
+            == "scene-cull") {
             auto checker_image = make_checker_4k();
             const raster::Texture2D<std::layout_right> row_major_texture{checker_image};
             const raster::Texture2D<raster::LayoutTiled4x4> tiled_texture{checker_image};
@@ -808,6 +907,32 @@ int main(int argc, char* argv[]) noexcept {
                     parse_extent(3, 1920U),
                     parse_extent(4, 1080U),
                     parse_extent(2, 224U)
+                );
+                return 0;
+            }
+            if (selected_mode == "scene-cull") {
+                const auto parse_extent = [&](int index, std::size_t fallback) noexcept {
+                    if (argc <= index) {
+                        return fallback;
+                    }
+
+                    const auto parsed = std::string_view(argv[index]);
+                    std::size_t value = 0;
+                    for (const auto digit : parsed) {
+                        if (digit < '0' || digit > '9') {
+                            return fallback;
+                        }
+                        value = value * 10U + static_cast<std::size_t>(digit - '0');
+                    }
+                    return value == 0U ? fallback : value;
+                };
+
+                benchmark_scene_cull(
+                    tiled_texture,
+                    parse_extent(3, 1920U),
+                    parse_extent(4, 1080U),
+                    parse_extent(2, 500U),
+                    parse_extent(5, 128U)
                 );
                 return 0;
             }
@@ -871,7 +996,9 @@ int main(int argc, char* argv[]) noexcept {
             return 0;
         }
         if (selected_mode != "fetch") {
-            report_failure("mode must be fetch, scene, scene-threads, scene-stress, or heap-aging");
+            report_failure(
+                "mode must be fetch, scene, scene-threads, scene-stress, scene-cull, or heap-aging"
+            );
             return 2;
         }
         if ((!selected_order.empty()

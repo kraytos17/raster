@@ -3,9 +3,7 @@
 // Depth-only light pass: prepares the mesh in light space and rasterizes
 // every triangle into the shadow depth buffer, reusing the rasterizer's
 // depth test/write. The no-op fragment proves the point: depth happens
-// before shading. Runs serially; parallelize only if the perf gate says
-// the shadow pass dominates (it reuses the same prepare_mesh as the main
-// pass, so no new math to verify).
+// before shading.
 
 #include <chrono>
 #include <cstddef>
@@ -29,7 +27,9 @@ namespace raster::render::detail {
         FloorShader<Layout>& light_shader,
         const SoAMesh& mesh,
         std::vector<PreparedTriangle<Layout>>& scratch,
-        SceneRenderDiagnostics* diagnostics
+        SceneRenderDiagnostics* diagnostics,
+        std::span<const SceneChunk> scene_chunks,
+        const Vec3f& lod_reference
     ) noexcept {
         static const bool profile =
             SDL_GetEnvironmentVariable(SDL_GetEnvironment(), "RASTER_PROFILE") != nullptr;
@@ -41,13 +41,13 @@ namespace raster::render::detail {
                 ShadowMap::k_size,
                 false,
                 0U,
-                mesh.triangle_count(),
+                scene_chunks.empty() ? mesh.triangle_count() : 0U,
                 0U,
-                0U,
+                scene_chunks.size(),
                 scratch,
                 diagnostics,
-                {},
-                light_shader.uniforms.eye_position
+                scene_chunks,
+                lod_reference
             )) {
             return false;
         }

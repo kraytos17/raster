@@ -6,12 +6,18 @@ namespace raster {
     struct Vec2f {
         float x{};
         float y{};
+
+        [[nodiscard]]
+        constexpr auto operator<=>(const Vec2f&) const noexcept = default;
     };
 
     struct Vec3f {
         float x{};
         float y{};
         float z{};
+
+        [[nodiscard]]
+        constexpr auto operator<=>(const Vec3f&) const noexcept = default;
     };
 
     struct alignas(16) Vec4f {
@@ -19,6 +25,9 @@ namespace raster {
         float y{};
         float z{};
         float w{};
+
+        [[nodiscard]]
+        constexpr auto operator<=>(const Vec4f&) const noexcept = default;
 
         [[nodiscard]]
         constexpr Vec3f xyz() const noexcept {

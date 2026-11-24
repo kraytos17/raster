@@ -143,6 +143,70 @@ namespace raster::render {
         return false;
     }
 
+    // Conservative AABB-centered sphere over one contiguous triangle
+    // range. An empty or out-of-range request yields a zero-triangle chunk,
+    // which valid_scene_chunks rejects. Call during scene setup, not per frame.
+    [[nodiscard]]
+    inline SceneChunk make_chunk_bounds(
+        const SoAMesh& mesh, std::size_t first_triangle, std::size_t triangle_count
+    ) noexcept {
+        if (triangle_count
+            == 0U
+            || first_triangle
+            >= mesh.triangle_count()
+            || triangle_count
+            > mesh.triangle_count()
+            - first_triangle) {
+            return SceneChunk{.first_triangle = first_triangle, .triangle_count = 0U};
+        }
+
+        Vec3f minimum{
+            .x = std::numeric_limits<float>::infinity(),
+            .y = std::numeric_limits<float>::infinity(),
+            .z = std::numeric_limits<float>::infinity(),
+        };
+        Vec3f maximum{
+            .x = -std::numeric_limits<float>::infinity(),
+            .y = -std::numeric_limits<float>::infinity(),
+            .z = -std::numeric_limits<float>::infinity(),
+        };
+        for (std::size_t triangle = first_triangle; triangle < first_triangle + triangle_count;
+             ++triangle) {
+            for (std::size_t corner = 0U; corner < 3U; ++corner) {
+                const auto index = static_cast<std::size_t>(mesh.indices[triangle * 3U + corner]);
+                const auto& point = mesh.positions[index];
+                minimum.x = std::min(minimum.x, point.x);
+                minimum.y = std::min(minimum.y, point.y);
+                minimum.z = std::min(minimum.z, point.z);
+                maximum.x = std::max(maximum.x, point.x);
+                maximum.y = std::max(maximum.y, point.y);
+                maximum.z = std::max(maximum.z, point.z);
+            }
+        }
+
+        const auto center = Vec3f{
+            .x = (minimum.x + maximum.x) * 0.5F,
+            .y = (minimum.y + maximum.y) * 0.5F,
+            .z = (minimum.z + maximum.z) * 0.5F,
+        };
+
+        float radius_squared = 0.0F;
+        for (std::size_t triangle = first_triangle; triangle < first_triangle + triangle_count;
+             ++triangle) {
+            for (std::size_t corner = 0U; corner < 3U; ++corner) {
+                const auto index = static_cast<std::size_t>(mesh.indices[triangle * 3U + corner]);
+                radius_squared =
+                    std::max(radius_squared, length_squared(mesh.positions[index] - center));
+            }
+        }
+        return SceneChunk{
+            .first_triangle = first_triangle,
+            .triangle_count = triangle_count,
+            .bounds_center = center,
+            .bounds_radius = std::sqrt(radius_squared),
+        };
+    }
+
     // Partition a mesh into stable consecutive triangle ranges and precompute
     // an AABB-centered sphere for each range. Returns no chunks for an empty
     // mesh or zero requested chunk size. Call during scene setup, not per frame.
@@ -162,54 +226,7 @@ namespace raster::render {
         );
         for (std::size_t first = 0U; first < mesh.triangle_count();) {
             const auto count = std::min(triangles_per_chunk, mesh.triangle_count() - first);
-            Vec3f minimum{
-                .x = std::numeric_limits<float>::infinity(),
-                .y = std::numeric_limits<float>::infinity(),
-                .z = std::numeric_limits<float>::infinity(),
-            };
-            Vec3f maximum{
-                .x = -std::numeric_limits<float>::infinity(),
-                .y = -std::numeric_limits<float>::infinity(),
-                .z = -std::numeric_limits<float>::infinity(),
-            };
-            for (std::size_t triangle = first; triangle < first + count; ++triangle) {
-                for (std::size_t corner = 0U; corner < 3U; ++corner) {
-                    const auto index =
-                        static_cast<std::size_t>(mesh.indices[triangle * 3U + corner]);
-                    const auto& point = mesh.positions[index];
-                    minimum.x = std::min(minimum.x, point.x);
-                    minimum.y = std::min(minimum.y, point.y);
-                    minimum.z = std::min(minimum.z, point.z);
-                    maximum.x = std::max(maximum.x, point.x);
-                    maximum.y = std::max(maximum.y, point.y);
-                    maximum.z = std::max(maximum.z, point.z);
-                }
-            }
-
-            const auto center = Vec3f{
-                .x = (minimum.x + maximum.x) * 0.5F,
-                .y = (minimum.y + maximum.y) * 0.5F,
-                .z = (minimum.z + maximum.z) * 0.5F,
-            };
-
-            float radius_squared = 0.0F;
-            for (std::size_t triangle = first; triangle < first + count; ++triangle) {
-                for (std::size_t corner = 0U; corner < 3U; ++corner) {
-                    const auto index =
-                        static_cast<std::size_t>(mesh.indices[triangle * 3U + corner]);
-                    radius_squared =
-                        std::max(radius_squared, length_squared(mesh.positions[index] - center));
-                }
-            }
-
-            chunks.push_back(
-                SceneChunk{
-                    .first_triangle = first,
-                    .triangle_count = count,
-                    .bounds_center = center,
-                    .bounds_radius = std::sqrt(radius_squared),
-                }
-            );
+            chunks.push_back(make_chunk_bounds(mesh, first, count));
             first += count;
         }
         return chunks;

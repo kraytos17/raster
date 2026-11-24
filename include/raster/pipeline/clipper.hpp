@@ -107,14 +107,14 @@ namespace raster {
 
         [[nodiscard]]
         inline std::uint8_t clip_outcode(const Vec4f& point, float guard_band) noexcept {
-            std::uint8_t code = 0;
+            unsigned code = 0U;
             for (std::size_t index = 0; index < clip_plane_count; ++index) {
                 const auto plane = static_cast<ClipPlane>(index);
                 if (clip_plane_distance(point, plane, guard_band) < 0.0F) {
-                    code = static_cast<std::uint8_t>(code | (1U << index));
+                    code |= (1U << index);
                 }
             }
-            return code;
+            return static_cast<std::uint8_t>(code);
         }
 
         [[nodiscard]]
@@ -190,14 +190,12 @@ namespace raster {
             return false;
         }
 
-        auto common_outcode = static_cast<std::uint8_t>((1U << clip_plane_count) - 1U);
+        auto common_outcode = (1U << clip_plane_count) - 1U;
         for (const auto& position : clip_positions) {
             if (!detail::finite(position)) {
                 return false;
             }
-            common_outcode = static_cast<std::uint8_t>(
-                common_outcode & detail::clip_outcode(position, guard_band)
-            );
+            common_outcode &= static_cast<unsigned>(detail::clip_outcode(position, guard_band));
         }
         return common_outcode != 0U;
     }
@@ -206,13 +204,20 @@ namespace raster {
     // interpolates clip position and all ShaderBase-tied varyings in homogeneous space before
     // any perspective divide. Scratch storage and triangle-fan output are
     // fixed-size stack arrays.
+    //
+    // The with-outcodes entry shares one outcode computation between the
+    // coarse frustum reject and the clip itself.
     template <ShaderProgram Shader> [[nodiscard]]
-    std::expected<ClippedTriangleFan<typename Shader::Varyings>, ClipError> clip_triangle_impl(
+    std::expected<ClippedTriangleFan<typename Shader::Varyings>, ClipError>
+    clip_triangle_impl_with_outcodes(
         const Shader& shader,
         const typename Shader::Varyings& vertex_a,
         const typename Shader::Varyings& vertex_b,
         const typename Shader::Varyings& vertex_c,
-        float guard_band
+        float guard_band,
+        std::uint8_t code_a,
+        std::uint8_t code_b,
+        std::uint8_t code_c
     ) noexcept {
         if (!std::isfinite(guard_band) || guard_band < 1.0F) {
             return std::unexpected{ClipError::InvalidGuardBand};
@@ -227,24 +232,18 @@ namespace raster {
         input.vertices[2] = vertex_c;
         input.size = 3;
 
-        std::uint8_t common_outcode = static_cast<std::uint8_t>((1U << clip_plane_count) - 1U);
-        std::uint8_t combined_outcode = 0;
-        const std::array<const VaryingsT*, 3> input_vertices{&vertex_a, &vertex_b, &vertex_c};
-        for (const auto* const vertex : input_vertices) {
-            if (!detail::finite(vertex->clip_pos)) {
-                return std::unexpected{ClipError::NonFiniteVertex};
-            }
-
-            const auto code = detail::clip_outcode(vertex->clip_pos, guard_band);
-            common_outcode = static_cast<std::uint8_t>(common_outcode & code);
-            combined_outcode = static_cast<std::uint8_t>(combined_outcode | code);
-        }
+        const auto outcode_a = static_cast<unsigned>(code_a);
+        const auto outcode_b = static_cast<unsigned>(code_b);
+        const auto outcode_c = static_cast<unsigned>(code_c);
+        const auto all_inside = (1U << clip_plane_count) - 1U;
+        const auto common_outcode = all_inside & outcode_a & outcode_b & outcode_c;
+        const auto combined_outcode = outcode_a | outcode_b | outcode_c;
 
         ClippedTriangleFan<VaryingsT> fan{};
-        if (common_outcode != 0) {
+        if (common_outcode != 0U) {
             return fan; // trivial reject
         }
-        if (combined_outcode == 0) {
+        if (combined_outcode == 0U) {
             if (vertex_a.clip_pos.w
                 <= 0.0F
                 || vertex_b.clip_pos.w
@@ -343,6 +342,34 @@ namespace raster {
             };
         }
         return fan;
+    }
+
+    template <ShaderProgram Shader> [[nodiscard]]
+    std::expected<ClippedTriangleFan<typename Shader::Varyings>, ClipError> clip_triangle_impl(
+        const Shader& shader,
+        const typename Shader::Varyings& vertex_a,
+        const typename Shader::Varyings& vertex_b,
+        const typename Shader::Varyings& vertex_c,
+        float guard_band
+    ) noexcept {
+        if (!std::isfinite(guard_band) || guard_band < 1.0F) {
+            return std::unexpected{ClipError::InvalidGuardBand};
+        }
+        if (!detail::finite(vertex_a.clip_pos)
+            || !detail::finite(vertex_b.clip_pos)
+            || !detail::finite(vertex_c.clip_pos)) {
+            return std::unexpected{ClipError::NonFiniteVertex};
+        }
+        return clip_triangle_impl_with_outcodes(
+            shader,
+            vertex_a,
+            vertex_b,
+            vertex_c,
+            guard_band,
+            detail::clip_outcode(vertex_a.clip_pos, guard_band),
+            detail::clip_outcode(vertex_b.clip_pos, guard_band),
+            detail::clip_outcode(vertex_c.clip_pos, guard_band)
+        );
     }
 
     template <ShaderProgram Shader> [[nodiscard]]

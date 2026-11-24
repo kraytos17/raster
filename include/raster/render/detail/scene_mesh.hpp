@@ -22,9 +22,7 @@
 
 namespace raster::render::detail {
     // Shared vertex-fetch, frustum-reject, and clip prologue for the serial
-    // and tiled prepare paths. Returns false only when clipping reports
-    // malformed geometry; an empty fan means the triangle was conservatively
-    // rejected before clip work.
+    // and tiled prepare paths.
     template <typename Layout> [[nodiscard]]
     inline bool clip_source_triangle(
         FloorShader<Layout>& shader,
@@ -47,22 +45,49 @@ namespace raster::render::detail {
         if (diagnostics != nullptr) {
             diagnostics->source_triangles.fetch_add(1U, std::memory_order_relaxed);
         }
+        if (!raster::detail::finite(varying_a.clip_pos)
+            || !raster::detail::finite(varying_b.clip_pos)
+            || !raster::detail::finite(varying_c.clip_pos)) {
+            const auto clipped = guard_band_test
+                ? clip_triangle_guard_band(shader, varying_a, varying_b, varying_c, 2.0F)
+                : clip_triangle(shader, varying_a, varying_b, varying_c);
+            if (!clipped) {
+                return false;
+            }
+            if (diagnostics != nullptr) {
+                diagnostics->clipped_triangles.fetch_add(1U, std::memory_order_relaxed);
+            }
 
-        const std::array<Vec4f, 3> clip_positions{
-            varying_a.clip_pos,
-            varying_b.clip_pos,
-            varying_c.clip_pos,
-        };
-        if (triangle_outside_clip_frustum(clip_positions, guard_band_test ? 2.0F : 1.0F)) {
+            fan_out = std::move(*clipped);
+            return true;
+        }
+
+        const auto guard = guard_band_test ? 2.0F : 1.0F;
+        const auto code_a = raster::detail::clip_outcode(varying_a.clip_pos, guard);
+        const auto code_b = raster::detail::clip_outcode(varying_b.clip_pos, guard);
+        const auto code_c = raster::detail::clip_outcode(varying_c.clip_pos, guard);
+        const unsigned all_inside = (1U << raster::clip_plane_count) - 1U;
+        const unsigned common = all_inside
+            & static_cast<unsigned>(code_a)
+            & static_cast<unsigned>(code_b)
+            & static_cast<unsigned>(code_c);
+        if (common != 0U) {
             if (diagnostics != nullptr) {
                 diagnostics->frustum_rejected_triangles.fetch_add(1U, std::memory_order_relaxed);
             }
             return true;
         }
 
-        const auto clipped = guard_band_test
-            ? clip_triangle_guard_band(shader, varying_a, varying_b, varying_c, 2.0F)
-            : clip_triangle(shader, varying_a, varying_b, varying_c);
+        const auto clipped = clip_triangle_impl_with_outcodes(
+            shader,
+            varying_a,
+            varying_b,
+            varying_c,
+            guard,
+            code_a,
+            code_b,
+            code_c
+        );
         if (!clipped) {
             return false;
         }
