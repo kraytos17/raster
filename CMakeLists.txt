@@ -76,6 +76,13 @@ target_sources(raster_engine INTERFACE
         include/raster/platform/sdl3_presenter.hpp
         include/raster/platform/allocation_probe.hpp
         include/raster/render/scene_renderer.hpp
+        include/raster/render/detail/scene_common.hpp
+        include/raster/render/detail/scene_mesh.hpp
+        include/raster/render/detail/scene_quad.hpp
+        include/raster/render/detail/scene_shader.hpp
+        include/raster/render/detail/scene_shadow.hpp
+        include/raster/render/detail/scene_tiled.hpp
+        include/raster/render/scene_chunks.hpp
 )
 target_include_directories(raster_engine INTERFACE
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>

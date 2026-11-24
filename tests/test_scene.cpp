@@ -285,6 +285,156 @@ namespace {
 
     // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
     TEST_CASE(
+        "chunked submission matches whole-mesh render and culls distant chunk",
+        "[scene][m3][chunks]"
+    ) {
+        constexpr std::size_t width = 96U;
+        constexpr std::size_t height = 80U;
+        const auto mesh = raster::load_obj(
+            std::filesystem::path{RASTER_ASSET_DIR} / "models/clipping_sphere.obj"
+        );
+        REQUIRE(mesh.has_value());
+        REQUIRE(mesh->triangle_count() > 32U);
+
+        const auto chunks = raster::render::make_scene_chunks(*mesh, 32U);
+        REQUIRE(chunks.size() > 1U);
+        REQUIRE(raster::render::valid_scene_chunks(chunks, mesh->triangle_count()));
+        for (const auto& chunk : chunks) {
+            REQUIRE(chunk.triangle_count <= 32U);
+            REQUIRE(chunk.bounds_radius >= 0.0F);
+            REQUIRE(std::isfinite(chunk.bounds_radius));
+            REQUIRE(chunk.distance_to(chunk.bounds_center) == 0.0F);
+        }
+        const auto nearest_chunk_distance =
+            std::ranges::min(chunks | std::views::transform([&](const auto& chunk) {
+            return chunk.distance_to(raster::Vec3f{.x = 0.0F, .y = 0.0F, .z = 3.5F});
+        }));
+        REQUIRE(nearest_chunk_distance >= 0.0F);
+
+        const raster::Vec3f view_origin{.x = 0.0F, .y = 0.0F, .z = 3.5F};
+        const raster::render::FreeLookCamera camera{
+            .position = view_origin,
+            .yaw = 0.0F,
+            .pitch = 0.0F,
+        };
+        raster::TgaImage image{};
+        image.width = 1U;
+        image.height = 1U;
+        image.pixels = {0xFFB08050U};
+        const raster::Texture2D<raster::LayoutTiled4x4> texture{
+            image,
+            raster::TextureColorSpace::Srgb
+        };
+        raster::Framebuffer whole{width, height};
+        raster::Framebuffer unchunked_tiled{width, height};
+        raster::Framebuffer chunked{width, height};
+        raster::render::TileRenderer renderer{4U};
+        raster::render::SceneRenderDiagnostics whole_stats{};
+        raster::render::SceneRenderDiagnostics unchunked_stats{};
+        raster::render::SceneRenderDiagnostics chunk_stats{};
+        REQUIRE(
+            raster::render::render_scene(
+                whole,
+                *mesh,
+                0U,
+                false,
+                true,
+                false,
+                false,
+                texture,
+                camera,
+                raster::render::SceneShading::Pbr,
+                raster::pbr::Material{},
+                nullptr,
+                &whole_stats,
+                {},
+                &view_origin
+            )
+        );
+        REQUIRE(renderer.render_scene(
+            unchunked_tiled,
+            *mesh,
+            0U,
+            false,
+            true,
+            false,
+            false,
+            texture,
+            camera,
+            raster::render::SceneShading::Pbr,
+            raster::pbr::Material{},
+            nullptr,
+            &unchunked_stats,
+            {},
+            &view_origin
+        ));
+        REQUIRE(renderer.render_scene(
+            chunked,
+            *mesh,
+            0U,
+            false,
+            true,
+            false,
+            false,
+            texture,
+            camera,
+            raster::render::SceneShading::Pbr,
+            raster::pbr::Material{},
+            nullptr,
+            &chunk_stats,
+            chunks,
+            &view_origin
+        ));
+        REQUIRE(chunked.color_storage == whole.color_storage);
+        REQUIRE(chunked.depth_storage == whole.depth_storage);
+        REQUIRE(unchunked_tiled.color_storage == whole.color_storage);
+        REQUIRE(unchunked_tiled.depth_storage == whole.depth_storage);
+        REQUIRE(chunk_stats.source_chunks == chunks.size());
+        REQUIRE(chunk_stats.frustum_rejected_chunks == 0U);
+        REQUIRE(chunk_stats.prepared_triangles == unchunked_stats.prepared_triangles);
+        REQUIRE(
+            chunk_stats.rasterized_triangle_submissions
+            == unchunked_stats.rasterized_triangle_submissions
+        );
+
+        auto distant_mesh = *mesh;
+        constexpr raster::Vec3f displacement{.x = 10'000.0F, .y = 0.0F, .z = 0.0F};
+        for (auto& position : distant_mesh.positions) {
+            position = position + displacement;
+        }
+        const auto distant_chunks = raster::render::make_scene_chunks(distant_mesh, 32U);
+        raster::Framebuffer distant_frame{width, height};
+        raster::render::SceneRenderDiagnostics distant_stats{};
+        REQUIRE(renderer.render_scene(
+            distant_frame,
+            distant_mesh,
+            0U,
+            false,
+            true,
+            false,
+            false,
+            texture,
+            camera,
+            raster::render::SceneShading::Pbr,
+            raster::pbr::Material(),
+            nullptr,
+            &distant_stats,
+            distant_chunks,
+            &view_origin
+        ));
+        REQUIRE(distant_stats.source_chunks == distant_chunks.size());
+        REQUIRE(distant_stats.frustum_rejected_chunks == distant_chunks.size());
+        REQUIRE(distant_stats.source_triangles == 0U);
+        REQUIRE(distant_stats.clipped_triangles == 0U);
+        REQUIRE(distant_stats.prepared_triangles == 0U);
+        REQUIRE(distant_stats.rasterized_triangle_submissions == 0U);
+        for (const auto pixel : distant_frame.color_storage) {
+            REQUIRE(pixel == 0xFF101018U);
+        }
+    }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE(
         "PBR scene mode is selectable, deterministic, and material-sensitive", "[scene][pbr]"
     ) {
         constexpr std::size_t width = 96U;

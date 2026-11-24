@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <span>
 
 #include "raster/math/vec.hpp"
 #include "raster/memory/framebuffer.hpp"
@@ -11,11 +12,14 @@
 #include "raster/memory/texture.hpp"
 #include "raster/memory/texture_layout.hpp"
 #include "raster/pipeline/pbr.hpp"
+#include "raster/render/scene_chunks.hpp"
 
 namespace raster::render {
     struct SceneRenderDiagnostics {
         std::atomic_size_t source_triangles{};
         std::atomic_size_t frustum_rejected_triangles{};
+        std::atomic_size_t source_chunks{};
+        std::atomic_size_t frustum_rejected_chunks{};
         std::atomic_size_t clipped_triangles{};
         std::atomic_size_t prepared_triangles{};
         std::atomic_size_t rasterized_triangle_submissions{};
@@ -23,6 +27,8 @@ namespace raster::render {
         void reset() noexcept {
             source_triangles.store(0U, std::memory_order_relaxed);
             frustum_rejected_triangles.store(0U, std::memory_order_relaxed);
+            source_chunks.store(0U, std::memory_order_relaxed);
+            frustum_rejected_chunks.store(0U, std::memory_order_relaxed);
             clipped_triangles.store(0U, std::memory_order_relaxed);
             prepared_triangles.store(0U, std::memory_order_relaxed);
             rasterized_triangle_submissions.store(0U, std::memory_order_relaxed);
@@ -77,7 +83,9 @@ namespace raster::render {
             SceneShading shading = SceneShading::Diffuse,
             const pbr::Material& material = pbr::Material(),
             const Texture2D<LayoutTiled4x4>* metallic_roughness = nullptr,
-            SceneRenderDiagnostics* diagnostics = nullptr
+            SceneRenderDiagnostics* diagnostics = nullptr,
+            std::span<const SceneChunk> chunks = {},
+            const Vec3f* lod_reference = nullptr
         ) noexcept;
 
     private:
@@ -103,7 +111,9 @@ namespace raster::render {
         SceneShading shading = SceneShading::Diffuse,
         const pbr::Material& material = pbr::Material(),
         const Texture2D<LayoutTiled4x4>* metallic_roughness = nullptr,
-        SceneRenderDiagnostics* diagnostics = nullptr
+        SceneRenderDiagnostics* diagnostics = nullptr,
+        std::span<const SceneChunk> chunks = {},
+        const Vec3f* lod_reference = nullptr
     ) noexcept;
 
     [[nodiscard]]
