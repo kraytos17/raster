@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <catch2/catch_test_macros.hpp>
 #include <cstddef>
@@ -443,6 +444,59 @@ namespace {
         REQUIRE(raster::pixel_center(0) == 8);
         REQUIRE(raster::pixel_center(-1) == -8);
         REQUIRE(raster::pixel_center(7) == 120);
+    }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE(
+        "packed fixed-point triangle matches six scalar conversions", "[barycentric][fixed]"
+    ) {
+        std::uint32_t state = 0x51ED2707U;
+        const auto next = [&state] noexcept {
+            state = state * 1'664'525U + 1'013'904'223U;
+            return state;
+        };
+        const auto coordinate = [&next] {
+            // Sweep well outside any viewport, including fractional values,
+            // negatives, and magnitudes past 2^24 where rounding is exact.
+            const auto magnitude = next() % 5U;
+            const auto base = static_cast<float>(next() >> 9U) * (1.0F / 8388608.0F);
+            const float scaled = magnitude == 0U ? base * 1.0e7F
+                : magnitude == 1U                ? base * 4096.0F
+                                                 : base * 4.0F - 2.0F;
+            return scaled;
+        };
+        for (std::size_t trial = 0U; trial < 1024U; ++trial) {
+            const std::array<raster::ScreenPoint, 3> points{
+                raster::ScreenPoint{.x = coordinate(), .y = coordinate()},
+                raster::ScreenPoint{.x = coordinate(), .y = coordinate()},
+                raster::ScreenPoint{.x = coordinate(), .y = coordinate()},
+            };
+            std::array<std::int32_t, 6> packed{};
+            raster::detail::to_fixed_triangle(points, packed);
+            REQUIRE(packed[0] == raster::to_fixed(points[0].x));
+            REQUIRE(packed[1] == raster::to_fixed(points[0].y));
+            REQUIRE(packed[2] == raster::to_fixed(points[1].x));
+            REQUIRE(packed[3] == raster::to_fixed(points[1].y));
+            REQUIRE(packed[4] == raster::to_fixed(points[2].x));
+            REQUIRE(packed[5] == raster::to_fixed(points[2].y));
+
+            const std::array<float, 3> inv_w{1.0F, 1.0F, 1.0F};
+            const std::array<float, 3> z_ndc{0.0F, 0.0F, 0.0F};
+            const auto from_array = raster::make_screen_triangle(points, inv_w, z_ndc);
+            const auto from_points =
+                raster::make_screen_triangle(points[0], points[1], points[2], inv_w, z_ndc);
+            REQUIRE(from_array.has_value() == from_points.has_value());
+            if (from_array.has_value()) {
+                REQUIRE(from_array->min_x == from_points->min_x);
+                REQUIRE(from_array->min_y == from_points->min_y);
+                REQUIRE(from_array->max_x == from_points->max_x);
+                REQUIRE(from_array->max_y == from_points->max_y);
+                REQUIRE(from_array->inv_area == from_points->inv_area);
+                REQUIRE(from_array->row_start == from_points->row_start);
+                REQUIRE(from_array->step_x == from_points->step_x);
+                REQUIRE(from_array->step_y == from_points->step_y);
+            }
+        }
     }
 
     // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.

@@ -53,11 +53,11 @@ namespace raster::render::detail {
 
         TileExecutor executor;
         TileBins bins{};
-        std::vector<PreparedTriangle<Layout>> prepared{};
+        std::vector<PreparedTriangle<FloorShader<Layout>>> prepared{};
         std::vector<ScreenTriangle> setups{};
-        std::vector<std::vector<PreparedTriangle<Layout>>> thread_prepared{};
+        std::vector<std::vector<PreparedTriangle<FloorShader<Layout>>>> thread_prepared{};
         ShadowMap shadow_map{};
-        std::vector<PreparedTriangle<Layout>> shadow_prepared{};
+        std::vector<PreparedTriangle<DepthShader>> shadow_prepared{};
     };
 
     template <typename Layout> [[nodiscard]]

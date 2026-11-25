@@ -201,6 +201,81 @@ namespace {
     }
 
     // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE("batched triangle codes match three scalar outcodes", "[clipper][cull]") {
+        std::uint32_t state = 0x9E3779B9U;
+        const auto next = [&state] noexcept {
+            state = state * 1'664'525U + 1'013'904'223U;
+            return state;
+        };
+        const auto unit = [&next] {
+            return static_cast<float>(next() >> 9U) * (1.0F / 8388608.0F);
+        };
+        for (const float guard : {1.0F, 2.0F}) {
+            for (std::size_t trial = 0U; trial < 512U; ++trial) {
+                const auto point = [&unit] {
+                    // Sweep well outside [-w, w] in every direction, including
+                    // exact on-plane values when the coordinate lands on ±w.
+                    return raster::Vec4f{
+                        .x = (unit() * 2.0F - 1.0F) * 3.0F,
+                        .y = (unit() * 2.0F - 1.0F) * 3.0F,
+                        .z = unit() * 2.0F - 0.5F,
+                        .w = 0.25F + unit() * 2.0F,
+                    };
+                };
+                const auto vertex_a = point();
+                const auto vertex_b = point();
+                const auto vertex_c = point();
+                unsigned common = 0U;
+                unsigned combined = 0U;
+                raster::detail::clip_triangle_codes(
+                    vertex_a,
+                    vertex_b,
+                    vertex_c,
+                    guard,
+                    common,
+                    combined
+                );
+                const auto code_a =
+                    static_cast<unsigned>(raster::detail::clip_outcode(vertex_a, guard));
+                const auto code_b =
+                    static_cast<unsigned>(raster::detail::clip_outcode(vertex_b, guard));
+                const auto code_c =
+                    static_cast<unsigned>(raster::detail::clip_outcode(vertex_c, guard));
+                const unsigned all_inside = (1U << raster::clip_plane_count) - 1U;
+                REQUIRE(common == (all_inside & code_a & code_b & code_c));
+                REQUIRE(combined == (code_a | code_b | code_c));
+            }
+        }
+
+        // Degenerate and non-finite inputs take the same branches on both
+        // paths: comparisons against NaN are false everywhere.
+        const std::array<raster::Vec4f, 4> edges{
+            raster::Vec4f{.x = 0.0F, .y = 0.0F, .z = 0.0F, .w = 0.0F},
+            raster::Vec4f{.x = 1.0F, .y = 1.0F, .z = 1.0F, .w = 1.0F},
+            raster::Vec4f{
+                .x = std::numeric_limits<float>::infinity(),
+                .y = 0.0F,
+                .z = 0.5F,
+                .w = 1.0F,
+            },
+            raster::Vec4f{
+                .x = std::numeric_limits<float>::quiet_NaN(),
+                .y = 0.0F,
+                .z = 0.5F,
+                .w = 1.0F,
+            },
+        };
+        for (const auto& edge : edges) {
+            unsigned common = 0U;
+            unsigned combined = 0U;
+            raster::detail::clip_triangle_codes(edge, edge, edge, 1.0F, common, combined);
+            const auto code = static_cast<unsigned>(raster::detail::clip_outcode(edge, 1.0F));
+            REQUIRE(common == code);
+            REQUIRE(combined == code);
+        }
+    }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
     TEST_CASE(
         "conservative clip-frustum reject keeps straddling and invalid triangles", "[clipper][cull]"
     ) {

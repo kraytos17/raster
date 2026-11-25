@@ -23,14 +23,14 @@
 namespace raster::render::detail {
     // Shared vertex-fetch, frustum-reject, and clip prologue for the serial
     // and tiled prepare paths.
-    template <typename Layout> [[nodiscard]]
+    template <typename Shader> [[nodiscard]]
     inline bool clip_source_triangle(
-        FloorShader<Layout>& shader,
+        Shader& shader,
         const SoAMesh& mesh,
         std::size_t triangle_index,
         bool guard_band_test,
         SceneRenderDiagnostics* diagnostics,
-        ClippedTriangleFan<typename FloorShader<Layout>::Varyings>& fan_out
+        ClippedTriangleFan<typename Shader::Varyings>& fan_out
     ) noexcept {
         const auto index_base = triangle_index * 3U;
         const auto vertex_a = static_cast<std::size_t>(mesh.indices[index_base]);
@@ -63,14 +63,16 @@ namespace raster::render::detail {
         }
 
         const auto guard = guard_band_test ? 2.0F : 1.0F;
-        const auto code_a = raster::detail::clip_outcode(varying_a.clip_pos, guard);
-        const auto code_b = raster::detail::clip_outcode(varying_b.clip_pos, guard);
-        const auto code_c = raster::detail::clip_outcode(varying_c.clip_pos, guard);
-        const unsigned all_inside = (1U << raster::clip_plane_count) - 1U;
-        const unsigned common = all_inside
-            & static_cast<unsigned>(code_a)
-            & static_cast<unsigned>(code_b)
-            & static_cast<unsigned>(code_c);
+        unsigned common = 0U;
+        unsigned combined = 0U;
+        raster::detail::clip_triangle_codes(
+            varying_a.clip_pos,
+            varying_b.clip_pos,
+            varying_c.clip_pos,
+            guard,
+            common,
+            combined
+        );
         if (common != 0U) {
             if (diagnostics != nullptr) {
                 diagnostics->frustum_rejected_triangles.fetch_add(1U, std::memory_order_relaxed);
@@ -78,15 +80,14 @@ namespace raster::render::detail {
             return true;
         }
 
-        const auto clipped = clip_triangle_impl_with_outcodes(
+        const auto clipped = clip_triangle_impl_with_masks(
             shader,
             varying_a,
             varying_b,
             varying_c,
             guard,
-            code_a,
-            code_b,
-            code_c
+            common,
+            combined
         );
         if (!clipped) {
             return false;
@@ -162,8 +163,7 @@ namespace raster::render::detail {
             ),
         };
 
-        const auto triangle =
-            make_screen_triangle(screen[0], screen[1], screen[2], inverse_w, reverse_z);
+        const auto triangle = make_screen_triangle(screen, inverse_w, reverse_z);
         if (!triangle) {
             return;
         }
@@ -294,14 +294,14 @@ namespace raster::render::detail {
         return true;
     }
 
-    template <typename Layout> struct PreparedTriangle {
+    template <typename Shader> struct PreparedTriangle {
         ScreenTriangle setup{};
-        std::array<typename FloorShader<Layout>::Varyings, 3> vertices{};
+        std::array<typename Shader::Varyings, 3> vertices{};
     };
 
-    template <typename Layout> [[nodiscard]]
+    template <typename Shader> [[nodiscard]]
     bool prepare_mesh(
-        FloorShader<Layout>& shader,
+        Shader& shader,
         const SoAMesh& mesh,
         std::size_t width,
         std::size_t height,
@@ -310,14 +310,14 @@ namespace raster::render::detail {
         std::size_t end_work,
         std::size_t begin_chunk,
         std::size_t end_chunk,
-        std::vector<PreparedTriangle<Layout>>& prepared,
+        std::vector<PreparedTriangle<Shader>>& prepared,
         SceneRenderDiagnostics* diagnostics,
         std::span<const SceneChunk> chunks,
         const Vec3f& lod_reference
     ) noexcept {
         prepared.clear();
         const auto prepare_triangle = [&](std::size_t triangle_index) noexcept -> bool {
-            ClippedTriangleFan<typename FloorShader<Layout>::Varyings> fan{};
+            ClippedTriangleFan<typename Shader::Varyings> fan{};
             if (!clip_source_triangle(
                     shader,
                     mesh,
@@ -329,7 +329,7 @@ namespace raster::render::detail {
                 return false;
             }
             for (const auto& clipped_triangle : fan.active_triangles()) {
-                const std::array<typename FloorShader<Layout>::Varyings, 3> vertices{
+                const std::array<typename Shader::Varyings, 3> vertices{
                     clipped_triangle.vertices[0],
                     clipped_triangle.vertices[1],
                     clipped_triangle.vertices[2],
@@ -344,7 +344,7 @@ namespace raster::render::detail {
                     vertices[1].clip_pos.z * inverse_w[1],
                     vertices[2].clip_pos.z * inverse_w[2],
                 };
-                const auto setup = make_screen_triangle(
+                const std::array<ScreenPoint, 3> screen{
                     viewport_to_screen(
                         vertices[0].clip_pos.x * inverse_w[0],
                         vertices[0].clip_pos.y * inverse_w[0],
@@ -363,9 +363,9 @@ namespace raster::render::detail {
                         width,
                         height
                     ),
-                    inverse_w,
-                    reverse_z
-                );
+                };
+
+                const auto setup = make_screen_triangle(screen, inverse_w, reverse_z);
                 if (setup) {
                     if (diagnostics != nullptr) {
                         diagnostics->prepared_triangles.fetch_add(1U, std::memory_order_relaxed);
@@ -375,7 +375,7 @@ namespace raster::render::detail {
                         );
                     }
                     prepared.push_back(
-                        PreparedTriangle<Layout>{.setup = *setup, .vertices = vertices}
+                        PreparedTriangle<Shader>{.setup = *setup, .vertices = vertices}
                     );
                 }
             }
@@ -423,7 +423,7 @@ namespace raster::render::detail {
     template <typename Layout> void rasterize_prepared_triangle(
         Framebuffer& framebuffer,
         FloorShader<Layout>& shader,
-        const PreparedTriangle<Layout>& triangle,
+        const PreparedTriangle<FloorShader<Layout>>& triangle,
         const RasterRegion& region
     ) noexcept {
         const auto color = framebuffer.color_view();

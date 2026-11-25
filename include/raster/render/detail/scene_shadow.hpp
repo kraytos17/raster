@@ -21,12 +21,12 @@
 #include "raster/render/scene_renderer.hpp"
 
 namespace raster::render::detail {
-    template <typename Layout> [[nodiscard]]
-    bool render_shadow_map(
+    [[nodiscard]]
+    inline bool render_shadow_map(
         ShadowMap& shadow,
-        FloorShader<Layout>& light_shader,
+        DepthShader& light_shader,
         const SoAMesh& mesh,
-        std::vector<PreparedTriangle<Layout>>& scratch,
+        std::vector<PreparedTriangle<DepthShader>>& scratch,
         SceneRenderDiagnostics* diagnostics,
         std::span<const SceneChunk> scene_chunks,
         const Vec3f& lod_reference
@@ -53,6 +53,7 @@ namespace raster::render::detail {
         }
 
         shadow.clear();
+        const auto timestamp_raster = steady_clock::now();
         auto depth_view = std::mdspan<float, Extents2D>{
             shadow.depth.data(),
             ShadowMap::k_size,
@@ -75,9 +76,11 @@ namespace raster::render::detail {
             try {
                 std::println(
                     stderr,
-                    "raster: profile shadow {:.2f} ms tris {}",
+                    "raster: profile shadow {:.2f} ms tris {} (prepare {:.2f} raster {:.2f})",
                     Milliseconds(steady_clock::now() - timestamp_begin).count(),
-                    scratch.size()
+                    scratch.size(),
+                    Milliseconds(timestamp_raster - timestamp_begin).count(),
+                    Milliseconds(steady_clock::now() - timestamp_raster).count()
                 );
             } catch (...) {
                 try {

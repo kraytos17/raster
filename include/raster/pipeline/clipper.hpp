@@ -12,6 +12,10 @@
 #include "raster/math/vec.hpp"
 #include "raster/pipeline/shader.hpp"
 
+#if defined(__x86_64__)
+#include <immintrin.h>
+#endif
+
 namespace raster {
     inline constexpr std::size_t clip_plane_count = 6;
     inline constexpr std::size_t clip_polygon_capacity = 12;
@@ -107,14 +111,75 @@ namespace raster {
 
         [[nodiscard]]
         inline std::uint8_t clip_outcode(const Vec4f& point, float guard_band) noexcept {
-            unsigned code = 0U;
-            for (std::size_t index = 0; index < clip_plane_count; ++index) {
-                const auto plane = static_cast<ClipPlane>(index);
-                if (clip_plane_distance(point, plane, guard_band) < 0.0F) {
-                    code |= (1U << index);
-                }
-            }
+            const auto scaled_w = guard_band * point.w;
+            const auto left_out = point.x + scaled_w < 0.0F;
+            const auto right_out = scaled_w - point.x < 0.0F;
+            const auto bottom_out = point.y + scaled_w < 0.0F;
+            const auto top_out = scaled_w - point.y < 0.0F;
+            const auto far_out = point.z < 0.0F;
+            const auto near_out = point.w - point.z < 0.0F;
+            const auto code = (static_cast<unsigned>(left_out) << 0U)
+                | (static_cast<unsigned>(right_out) << 1U)
+                | (static_cast<unsigned>(bottom_out) << 2U)
+                | (static_cast<unsigned>(top_out) << 3U)
+                | (static_cast<unsigned>(far_out) << 4U)
+                | (static_cast<unsigned>(near_out) << 5U);
             return static_cast<std::uint8_t>(code);
+        }
+
+        inline void clip_triangle_codes(
+            const Vec4f& vertex_a,
+            const Vec4f& vertex_b,
+            const Vec4f& vertex_c,
+            float guard_band,
+            unsigned& common_out,
+            unsigned& combined_out
+        ) noexcept {
+#if defined(__x86_64__)
+            __m128 row0 = _mm_loadu_ps(&vertex_a.x);
+            __m128 row1 = _mm_loadu_ps(&vertex_b.x);
+            __m128 row2 = _mm_loadu_ps(&vertex_c.x);
+            __m128 row3 = row2;
+            // 4x4 transpose rows (ax,ay,az,aw)... into columns, so each
+            // plane test runs over all three vertices in one vector op.
+            // The fourth lane duplicates vertex C and is masked off below.
+            const __m128 unpack0 = _mm_unpacklo_ps(row0, row1);
+            const __m128 unpack1 = _mm_unpacklo_ps(row2, row3);
+            const __m128 unpack2 = _mm_unpackhi_ps(row0, row1);
+            const __m128 unpack3 = _mm_unpackhi_ps(row2, row3);
+            const __m128 xs = _mm_movelh_ps(unpack0, unpack1);
+            const __m128 ys = _mm_movehl_ps(unpack1, unpack0);
+            const __m128 zs = _mm_movelh_ps(unpack2, unpack3);
+            const __m128 ws = _mm_movehl_ps(unpack3, unpack2);
+            const __m128 scaled = _mm_mul_ps(_mm_set1_ps(guard_band), ws);
+            const __m128 zero = _mm_setzero_ps();
+
+            unsigned common_bits = (1U << clip_plane_count) - 1U;
+            unsigned combined_bits = 0U;
+            const auto accumulate = [&](__m128 distance, unsigned bit) noexcept {
+                const auto mask =
+                    static_cast<unsigned>(_mm_movemask_ps(_mm_cmplt_ps(distance, zero))) & 0x7U;
+                combined_bits |= (mask != 0U) ? bit : 0U;
+                common_bits &= (mask == 0x7U) ? ~0U : ~bit;
+            };
+
+            accumulate(_mm_add_ps(xs, scaled), 1U << 0U);
+            accumulate(_mm_sub_ps(scaled, xs), 1U << 1U);
+            accumulate(_mm_add_ps(ys, scaled), 1U << 2U);
+            accumulate(_mm_sub_ps(scaled, ys), 1U << 3U);
+            accumulate(zs, 1U << 4U);
+            accumulate(_mm_sub_ps(ws, zs), 1U << 5U);
+
+            common_out = common_bits;
+            combined_out = combined_bits;
+#else
+            const auto code_a = static_cast<unsigned>(clip_outcode(vertex_a, guard_band));
+            const auto code_b = static_cast<unsigned>(clip_outcode(vertex_b, guard_band));
+            const auto code_c = static_cast<unsigned>(clip_outcode(vertex_c, guard_band));
+
+            common_out = ((1U << clip_plane_count) - 1U) & code_a & code_b & code_c;
+            combined_out = code_a | code_b | code_c;
+#endif
         }
 
         [[nodiscard]]
@@ -209,15 +274,14 @@ namespace raster {
     // coarse frustum reject and the clip itself.
     template <ShaderProgram Shader> [[nodiscard]]
     std::expected<ClippedTriangleFan<typename Shader::Varyings>, ClipError>
-    clip_triangle_impl_with_outcodes(
+    clip_triangle_impl_with_masks(
         const Shader& shader,
         const typename Shader::Varyings& vertex_a,
         const typename Shader::Varyings& vertex_b,
         const typename Shader::Varyings& vertex_c,
         float guard_band,
-        std::uint8_t code_a,
-        std::uint8_t code_b,
-        std::uint8_t code_c
+        unsigned common_outcode,
+        unsigned combined_outcode
     ) noexcept {
         if (!std::isfinite(guard_band) || guard_band < 1.0F) {
             return std::unexpected{ClipError::InvalidGuardBand};
@@ -231,13 +295,6 @@ namespace raster {
         input.vertices[1] = vertex_b;
         input.vertices[2] = vertex_c;
         input.size = 3;
-
-        const auto outcode_a = static_cast<unsigned>(code_a);
-        const auto outcode_b = static_cast<unsigned>(code_b);
-        const auto outcode_c = static_cast<unsigned>(code_c);
-        const auto all_inside = (1U << clip_plane_count) - 1U;
-        const auto common_outcode = all_inside & outcode_a & outcode_b & outcode_c;
-        const auto combined_outcode = outcode_a | outcode_b | outcode_c;
 
         ClippedTriangleFan<VaryingsT> fan{};
         if (common_outcode != 0U) {
@@ -342,6 +399,33 @@ namespace raster {
             };
         }
         return fan;
+    }
+
+    template <ShaderProgram Shader> [[nodiscard]]
+    std::expected<ClippedTriangleFan<typename Shader::Varyings>, ClipError>
+    clip_triangle_impl_with_outcodes(
+        const Shader& shader,
+        const typename Shader::Varyings& vertex_a,
+        const typename Shader::Varyings& vertex_b,
+        const typename Shader::Varyings& vertex_c,
+        float guard_band,
+        std::uint8_t code_a,
+        std::uint8_t code_b,
+        std::uint8_t code_c
+    ) noexcept {
+        const auto outcode_a = static_cast<unsigned>(code_a);
+        const auto outcode_b = static_cast<unsigned>(code_b);
+        const auto outcode_c = static_cast<unsigned>(code_c);
+        const auto all_inside = (1U << clip_plane_count) - 1U;
+        return clip_triangle_impl_with_masks(
+            shader,
+            vertex_a,
+            vertex_b,
+            vertex_c,
+            guard_band,
+            all_inside & outcode_a & outcode_b & outcode_c,
+            outcode_a | outcode_b | outcode_c
+        );
     }
 
     template <ShaderProgram Shader> [[nodiscard]]

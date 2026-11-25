@@ -224,10 +224,8 @@ namespace raster::render {
         const auto light_view_projection = light_projection * light_view;
         shader.uniforms.light_view_projection = light_view_projection;
 
-        detail::FloorShader<Layout> light_shader{};
+        detail::DepthShader light_shader{};
         light_shader.uniforms.model_view_projection = light_view_projection;
-        light_shader.uniforms.light_view_projection = light_view_projection;
-        light_shader.uniforms.eye_position = eye;
         const bool shadows_enabled =
             SDL_GetEnvironmentVariable(SDL_GetEnvironment(), "RASTER_NO_SHADOW") == nullptr;
         if (tile_state != nullptr) {
@@ -261,7 +259,8 @@ namespace raster::render {
             }
         } else {
             thread_local detail::ShadowMap serial_shadow{};
-            thread_local std::vector<detail::PreparedTriangle<Layout>> serial_shadow_prepared{};
+            thread_local std::vector<detail::PreparedTriangle<detail::DepthShader>>
+                serial_shadow_prepared{};
             shader.uniforms.shadow_map = shadows_enabled ? &serial_shadow : nullptr;
             if (shadows_enabled
                 && !detail::render_shadow_map(

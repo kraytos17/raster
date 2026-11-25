@@ -38,6 +38,9 @@ namespace raster {
         std::size_t width{};
         std::size_t height{};
         std::vector<std::uint32_t> texels{};
+        // Cached float extents for the per-gather texel-coordinate scale.
+        float width_f{1.0F};
+        float height_f{1.0F};
     };
 
     // Round-half-up quantization for non-negative bounded channel values in
@@ -82,6 +85,8 @@ namespace raster {
                     .width = width_,
                     .height = height_,
                     .texels = std::vector<std::uint32_t>(mapping.required_span_size()),
+                    .width_f = static_cast<float>(width_),
+                    .height_f = static_cast<float>(height_),
                 }
             );
             for (std::size_t y = 0; y < height_; ++y) {
@@ -125,8 +130,8 @@ namespace raster {
                 return std::clamp(fractional, 0.0F, 0.99999994F);
             };
 
-            const auto x = static_cast<std::size_t>(wrap(u) * static_cast<float>(mip.width));
-            const auto y = static_cast<std::size_t>(wrap(v) * static_cast<float>(mip.height));
+            const auto x = static_cast<std::size_t>(wrap(u) * mip.width_f);
+            const auto y = static_cast<std::size_t>(wrap(v) * mip.height_f);
             const typename View::mapping_type mapping{Extents{mip.height, mip.width}};
             return mip.texels[mapping(y, x)];
         }
@@ -379,37 +384,40 @@ namespace raster {
                 return coordinate - std::floor(coordinate);
             };
 
-            const auto texel_x = wrap(u) * static_cast<float>(mip.width) - 0.5F;
-            const auto texel_y = wrap(v) * static_cast<float>(mip.height) - 0.5F;
-            const auto base_x = static_cast<std::int64_t>(std::floor(texel_x));
-            const auto base_y = static_cast<std::int64_t>(std::floor(texel_y));
+            const auto texel_x = wrap(u) * mip.width_f - 0.5F;
+            const auto texel_y = wrap(v) * mip.height_f - 0.5F;
+            const auto floored_x = std::floor(texel_x);
+            const auto floored_y = std::floor(texel_y);
+            const auto base_x = static_cast<std::int64_t>(floored_x);
+            const auto base_y = static_cast<std::int64_t>(floored_y);
 
-            fraction_x = texel_x - static_cast<float>(base_x);
-            fraction_y = texel_y - static_cast<float>(base_y);
+            fraction_x = texel_x - floored_x;
+            fraction_y = texel_y - floored_y;
             const typename View::mapping_type mapping{Extents{mip.height, mip.width}};
-            const auto wrap_index = [](std::int64_t value, std::size_t extent) noexcept {
+            // base is in [-1, extent - 1] (texel is in [-0.5, extent - 0.5)),
+            // so each wrap needs only one side: negatives can only be -1 and
+            // base + 1 can only overflow to exactly extent.
+            const auto wrap_base = [](std::int64_t base, std::size_t extent) noexcept {
                 const auto signed_extent = static_cast<std::int64_t>(extent);
-                if (value < 0) {
-                    return static_cast<std::size_t>(value + signed_extent);
-                }
-                if (value >= signed_extent) {
-                    return static_cast<std::size_t>(value - signed_extent);
-                }
-                return static_cast<std::size_t>(value);
+                return static_cast<std::size_t>(base < 0 ? base + signed_extent : base);
+            };
+            const auto wrap_next = [](std::int64_t base, std::size_t extent) noexcept {
+                const auto signed_extent = static_cast<std::int64_t>(extent);
+                const auto next = base + 1;
+                return static_cast<std::size_t>(
+                    next >= signed_extent ? next - signed_extent : next
+                );
             };
 
-            corners[0] =
-                mip.texels[mapping(wrap_index(base_y, mip.height), wrap_index(base_x, mip.width))];
-            corners[1] =
-                mip.texels
-                    [mapping(wrap_index(base_y, mip.height), wrap_index(base_x + 1, mip.width))];
-            corners[2] =
-                mip.texels
-                    [mapping(wrap_index(base_y + 1, mip.height), wrap_index(base_x, mip.width))];
-            corners[3] = mip.texels[mapping(
-                wrap_index(base_y + 1, mip.height),
-                wrap_index(base_x + 1, mip.width)
-            )];
+            const auto x0 = wrap_base(base_x, mip.width);
+            const auto x1 = wrap_next(base_x, mip.width);
+            const auto y0 = wrap_base(base_y, mip.height);
+            const auto y1 = wrap_next(base_y, mip.height);
+
+            corners[0] = mip.texels[mapping(y0, x0)];
+            corners[1] = mip.texels[mapping(y0, x1)];
+            corners[2] = mip.texels[mapping(y1, x0)];
+            corners[3] = mip.texels[mapping(y1, x1)];
         }
 
         // Bilinear interpolation in float: the four corner weights are
@@ -460,6 +468,8 @@ namespace raster {
                     .width = next_width,
                     .height = next_height,
                     .texels = std::vector<std::uint32_t>(destination_mapping.required_span_size()),
+                    .width_f = static_cast<float>(next_width),
+                    .height_f = static_cast<float>(next_height),
                 };
 
                 const typename View::mapping_type source_mapping{

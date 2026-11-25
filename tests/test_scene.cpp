@@ -26,6 +26,7 @@
 #include "raster/pipeline/rasterizer.hpp"
 #include "raster/pipeline/shader.hpp"
 #include "raster/platform/allocation_probe.hpp"
+#include "raster/render/detail/scene_shader.hpp"
 #include "raster/render/scene_renderer.hpp"
 
 #if defined(__clang__)
@@ -838,6 +839,63 @@ namespace {
             }
         }
         REQUIRE(changed_shadow_pixels > 20U);
+    }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE("depth shader matches floor shader clip positions", "[scene][shadow]") {
+        // The shadow pass consumes only clip_pos, so DepthShader must produce
+        // bit-identical clip positions to FloorShader under the same matrix.
+        std::uint32_t state = 0xC0FFEE01U;
+        const auto next = [&state] noexcept {
+            state = state * 1'664'525U + 1'013'904'223U;
+            return state;
+        };
+        const auto coordinate = [&next] {
+            return static_cast<float>(next() >> 9U) * (1.0F / 8388608.0F) * 8.0F - 4.0F;
+        };
+        for (std::size_t trial = 0U; trial < 256U; ++trial) {
+            raster::Mat4f mvp{};
+            for (auto& column : mvp.columns) {
+                column = raster::Vec4f{
+                    .x = coordinate(),
+                    .y = coordinate(),
+                    .z = coordinate(),
+                    .w = coordinate(),
+                };
+            }
+            raster::render::detail::FloorShader<raster::LayoutTiled4x4> floor_shader{};
+            floor_shader.uniforms.model_view_projection = mvp;
+            raster::render::detail::DepthShader depth_shader{};
+            depth_shader.uniforms.model_view_projection = mvp;
+
+            const raster::Vec3f position{.x = coordinate(), .y = coordinate(), .z = coordinate()};
+            const raster::Vec3f other{.x = coordinate(), .y = coordinate(), .z = coordinate()};
+            const auto full = floor_shader.vertex(
+                position,
+                raster::Vec2f{.x = 0.25F, .y = 0.75F},
+                raster::Vec3f{.x = 0.0F, .y = 1.0F, .z = 0.0F}
+            );
+            const auto full_other = floor_shader.vertex(
+                other,
+                raster::Vec2f{.x = 0.1F, .y = 0.2F},
+                raster::Vec3f{.x = 0.0F, .y = 0.0F, .z = 1.0F}
+            );
+            const auto lean = depth_shader.vertex(position, raster::Vec2f{}, raster::Vec3f{});
+            const auto lean_other = depth_shader.vertex(other, raster::Vec2f{}, raster::Vec3f{});
+            REQUIRE(lean.clip_pos.x == full.clip_pos.x);
+            REQUIRE(lean.clip_pos.y == full.clip_pos.y);
+            REQUIRE(lean.clip_pos.z == full.clip_pos.z);
+            REQUIRE(lean.clip_pos.w == full.clip_pos.w);
+
+            // Edge interpolation agrees on clip_pos for a cut point between
+            // distinct vertices; the empty attribute list changes nothing.
+            const auto cut_lean = depth_shader.interpolate_edge(lean, lean_other, 0.37F);
+            const auto cut_full = floor_shader.interpolate_edge(full, full_other, 0.37F);
+            REQUIRE(cut_lean.clip_pos.x == cut_full.clip_pos.x);
+            REQUIRE(cut_lean.clip_pos.y == cut_full.clip_pos.y);
+            REQUIRE(cut_lean.clip_pos.z == cut_full.clip_pos.z);
+            REQUIRE(cut_lean.clip_pos.w == cut_full.clip_pos.w);
+        }
     }
 
     // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.

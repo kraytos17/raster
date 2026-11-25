@@ -16,6 +16,10 @@
 #include "raster/memory/framebuffer.hpp"
 #include "raster/pipeline/simd_quad.hpp"
 
+#if defined(__x86_64__)
+#include <immintrin.h>
+#endif
+
 namespace raster {
     // Why a triangle was rejected during screen-space setup.
     enum class SetupError {
@@ -98,6 +102,51 @@ namespace raster {
     };
 
     namespace detail {
+        // Converts three screen points to 28.4 fixed coordinates in one pass;
+        // out is {ax, ay, bx, by, cx, cy}. The packed path multiplies by the
+        // subpixel scale and rounds with the MXCSR mode, exactly matching six
+        // to_fixed calls lane for lane (out-of-range and NaN inputs convert
+        // to INT32_MIN on both paths, and the scale is an exact power of two).
+        inline void to_fixed_triangle(
+            const std::array<ScreenPoint, 3>& points, std::array<std::int32_t, 6>& out
+        ) noexcept {
+#if defined(__x86_64__)
+            const __m128 scale = _mm_set1_ps(static_cast<float>(subpixel_scale));
+            const __m128 xy01 = _mm_mul_ps(
+                // NOLINTNEXTLINE
+                _mm_loadu_ps(reinterpret_cast<const float*>(points.data())),
+                scale
+            );
+            const __m128 xy12 = _mm_mul_ps(
+                // NOLINTNEXTLINE
+                _mm_loadu_ps(reinterpret_cast<const float*>(&points[1])),
+                scale
+            );
+            // The stores overlap on bx/by with identical values: lanes 2-3 of
+            // the first register and lanes 0-1 of the second convert the same
+            // scaled inputs.
+            _mm_storeu_si128(
+                // NOLINTNEXTLINE
+                reinterpret_cast<__m128i*>(out.data()),
+                _mm_cvtps_epi32(xy01)
+            );
+            _mm_storeu_si128(
+                // NOLINTNEXTLINE
+                reinterpret_cast<__m128i*>(&out[2]),
+                _mm_cvtps_epi32(xy12)
+            );
+#else
+            out = {
+                to_fixed(points[0].x),
+                to_fixed(points[0].y),
+                to_fixed(points[1].x),
+                to_fixed(points[1].y),
+                to_fixed(points[2].x),
+                to_fixed(points[2].y),
+            };
+#endif
+        }
+
         // Floor division that stays correct for negative dividends (a plain
         // shift or truncated division rounds toward zero).
         [[nodiscard]]
@@ -179,18 +228,19 @@ namespace raster {
     // for zero area.
     [[nodiscard]]
     inline std::expected<ScreenTriangle, SetupError> make_screen_triangle(
-        ScreenPoint a,
-        ScreenPoint b,
-        ScreenPoint c,
+        const std::array<ScreenPoint, 3>& points,
         const std::array<float, 3>& inv_w,
         const std::array<float, 3>& z_ndc
     ) noexcept {
-        const std::int32_t ax = to_fixed(a.x);
-        const std::int32_t ay = to_fixed(a.y);
-        const std::int32_t bx = to_fixed(b.x);
-        const std::int32_t by = to_fixed(b.y);
-        const std::int32_t cx = to_fixed(c.x);
-        const std::int32_t cy = to_fixed(c.y);
+        std::array<std::int32_t, 6> fixed{};
+        detail::to_fixed_triangle(points, fixed);
+
+        const std::int32_t ax = fixed[0];
+        const std::int32_t ay = fixed[1];
+        const std::int32_t bx = fixed[2];
+        const std::int32_t by = fixed[3];
+        const std::int32_t cx = fixed[4];
+        const std::int32_t cy = fixed[5];
         const std::int64_t area = edge_function(ax, ay, bx, by, cx, cy);
         if (area == 0) {
             return std::unexpected{SetupError::Degenerate};
@@ -237,6 +287,18 @@ namespace raster {
             edge_function(cx, cy, ax, ay, origin_x, origin_y),
         };
         return triangle;
+    }
+
+    // Screen-space triangle from three points: packs into the array entry.
+    [[nodiscard]]
+    inline std::expected<ScreenTriangle, SetupError> make_screen_triangle(
+        ScreenPoint a,
+        ScreenPoint b,
+        ScreenPoint c,
+        const std::array<float, 3>& inv_w,
+        const std::array<float, 3>& z_ndc
+    ) noexcept {
+        return make_screen_triangle({a, b, c}, inv_w, z_ndc);
     }
 
     // Plain screen-space triangle (screen-linear depth of 0, inv_w of 1).

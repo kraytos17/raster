@@ -245,5 +245,46 @@ namespace raster::render::detail {
         }
     };
 
+    // Depth-only shader for the shadow-map pass: the rasterizer consumes
+    // clip positions (screen setup plus reverse-Z depth) and nothing else,
+    // so the second model-view multiply and every interpolated attribute of
+    // FloorShader are dead weight here. Single-matvec vertex plus empty
+    // attributes keeps interpolate_edge to a clip_pos lerp.
+    struct DepthShader final : ShaderBase {
+        struct Uniforms {
+            Mat4f model_view_projection{};
+        };
+
+        Uniforms uniforms{};
+
+        struct Varyings {
+            Vec4f clip_pos{};
+
+            [[nodiscard]]
+            constexpr auto attributes(this auto&&) noexcept {
+                return std::tie();
+            }
+        };
+
+        [[nodiscard]]
+        constexpr Varyings vertex(Vec3f position, Vec2f, Vec3f) const noexcept {
+            const Vec4f world{
+                .x = position.x,
+                .y = position.y,
+                .z = position.z,
+                .w = 1.0F,
+            };
+            return Varyings{.clip_pos = uniforms.model_view_projection * world};
+        }
+
+        // Never invoked: the shadow pass rasterizes depth with a no-op
+        // fragment. Present only to satisfy ShaderProgram.
+        [[nodiscard]]
+        constexpr Vec4f fragment(const Varyings&) const noexcept {
+            return Vec4f{};
+        }
+    };
+
     static_assert(ShaderProgram<FloorShader<LayoutTiled4x4>>);
+    static_assert(ShaderProgram<DepthShader>);
 } // namespace raster::render::detail

@@ -1,5 +1,5 @@
 CompileFlags:
-  Add: [-std=c++23, -Wall, -Wextra, -Wpedantic]
+  Add: [-std=c++23, -Wall, -Wextra, -Wpedantic, -I../../include]
   CompilationDatabase: build/debug-sanitized
   Remove: [-march=native, -mavx*, -mfma*]
 
