@@ -337,7 +337,9 @@ namespace {
         std::size_t width,
         std::size_t height,
         std::size_t columns,
-        std::size_t triangles_per_chunk
+        std::size_t triangles_per_chunk,
+        std::string_view only = {},
+        std::size_t threads = 0U
     ) {
         const auto mesh =
             raster::make_grid_mesh_tiled(columns, columns, 30.0F, -0.5F, -90.0F, 8.0F, 8U);
@@ -364,12 +366,32 @@ namespace {
         constexpr std::size_t measured = 5U;
         raster::Framebuffer framebuffer{width, height};
         raster::render::SceneRenderDiagnostics cull_stats{};
+        raster::render::TileRenderer tiled_renderer{threads == 0U ? 1U : threads};
         const auto time_render = [&](const raster::SoAMesh& target,
                                      const raster::render::FreeLookCamera& camera,
                                      std::span<const raster::render::SceneChunk> active_chunks,
                                      const char* label) {
             const auto render_once = [&] noexcept {
-                return raster::render::render_scene(
+                if (threads == 0U) {
+                    return raster::render::render_scene(
+                        framebuffer,
+                        target,
+                        0U,
+                        false,
+                        true,
+                        false,
+                        false,
+                        texture,
+                        camera,
+                        raster::render::SceneShading::Diffuse,
+                        raster::pbr::Material(),
+                        nullptr,
+                        &cull_stats,
+                        active_chunks,
+                        &camera.position
+                    );
+                }
+                return tiled_renderer.render_scene(
                     framebuffer,
                     target,
                     0U,
@@ -409,18 +431,38 @@ namespace {
         };
 
         const raster::SoAMesh empty{};
-        const auto clear_only = time_render(empty, facing, {}, "clear-only baseline");
-        const auto facing_plain = time_render(mesh, facing, {}, "facing unchunked");
-        const auto facing_chunked = time_render(mesh, facing, chunks, "facing chunked");
-        const auto behind_plain = time_render(mesh, behind, {}, "behind-camera unchunked");
-        const auto behind_chunked = time_render(mesh, behind, chunks, "behind-camera chunked");
-        std::println(
-            "scene-cull culled-away cost: unchunked {:.2f}x clear, chunked {:.2f}x clear "
-            "({} runs)",
-            static_cast<double>(behind_plain) / static_cast<double>(clear_only),
-            static_cast<double>(behind_chunked) / static_cast<double>(clear_only),
-            measured
-        );
+        std::uint64_t clear_only = 0U;
+        std::uint64_t facing_plain = 0U;
+        std::uint64_t facing_chunked = 0U;
+        std::uint64_t behind_plain = 0U;
+        std::uint64_t behind_chunked = 0U;
+        const auto selected = [&](std::string_view label) noexcept {
+            return only.empty() || only == label;
+        };
+        if (selected("clear-only")) {
+            clear_only = time_render(empty, facing, {}, "clear-only baseline");
+        }
+        if (selected("facing")) {
+            facing_plain = time_render(mesh, facing, {}, "facing unchunked");
+        }
+        if (selected("facing-chunked")) {
+            facing_chunked = time_render(mesh, facing, chunks, "facing chunked");
+        }
+        if (selected("behind")) {
+            behind_plain = time_render(mesh, behind, {}, "behind-camera unchunked");
+        }
+        if (selected("behind-chunked")) {
+            behind_chunked = time_render(mesh, behind, chunks, "behind-camera chunked");
+        }
+        if (only.empty()) {
+            std::println(
+                "scene-cull culled-away cost: unchunked {:.2f}x clear, chunked {:.2f}x clear "
+                "({} runs)",
+                static_cast<double>(behind_plain) / static_cast<double>(clear_only),
+                static_cast<double>(behind_chunked) / static_cast<double>(clear_only),
+                measured
+            );
+        }
 
         static_cast<void>(facing_plain);
         static_cast<void>(facing_chunked);
@@ -932,7 +974,9 @@ int main(int argc, char* argv[]) noexcept {
                     parse_extent(3, 1920U),
                     parse_extent(4, 1080U),
                     parse_extent(2, 500U),
-                    parse_extent(5, 128U)
+                    parse_extent(5, 128U),
+                    argc > 6 ? std::string_view{argv[6]} : std::string_view{},
+                    argc > 7 ? parse_extent(7, 0U) : 0U
                 );
                 return 0;
             }

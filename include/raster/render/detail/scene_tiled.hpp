@@ -118,19 +118,38 @@ namespace raster::render::detail {
         const auto timestamp_merge_begin = steady_clock::now();
         auto& prepared = tile_state.prepared;
         auto& setups = tile_state.setups;
-
-        prepared.clear();
-        setups.clear();
-        setups.reserve(prepared.capacity());
+        std::size_t merged_total = 0U;
         for (const auto& chunk : tile_state.thread_prepared) {
-            for (const auto& triangle : chunk) {
-                prepared.push_back(triangle);
-                setups.push_back(triangle.setup);
-            }
+            merged_total += chunk.size();
+        }
+        if (prepared.size() != merged_total) {
+            prepared.resize(merged_total);
+            setups.resize(merged_total);
         }
 
+        tile_state.executor.execute(worker_count, [&](std::size_t worker) noexcept {
+            std::size_t offset = 0U;
+            for (std::size_t prior = 0U; prior < worker; ++prior) {
+                offset += tile_state.thread_prepared[prior].size();
+            }
+
+            const auto& chunk = tile_state.thread_prepared[worker];
+            for (std::size_t index = 0U; index < chunk.size(); ++index) {
+                prepared[offset + index] = chunk[index];
+                setups[offset + index] = chunk[index].setup;
+            }
+        });
+
         const auto timestamp_bin_begin = steady_clock::now();
-        bin_triangles(tile_state.setups, width, height, tile_state.bins);
+        bin_triangles(
+            tile_state.setups,
+            width,
+            height,
+            tile_state.bins,
+            tile_state.executor,
+            worker_count
+        );
+
         const auto timestamp_raster_begin = steady_clock::now();
         tile_state.executor.execute(tile_state.bins.tile_count(), [&](std::size_t tile) noexcept {
             const auto tile_x = tile % tile_state.bins.tile_columns();

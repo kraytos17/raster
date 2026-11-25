@@ -150,6 +150,66 @@ namespace {
     }
 
     // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE("parallel binning matches serial bins exactly", "[tile][binning]") {
+        std::uint32_t state = 0xB16B00B5U;
+        const auto next = [&state] noexcept {
+            state = state * 1'664'525U + 1'013'904'223U;
+            return state;
+        };
+        constexpr std::size_t width = 130U;
+        constexpr std::size_t height = 75U;
+        std::vector<raster::ScreenTriangle> triangles{};
+        triangles.reserve(256U);
+        for (std::size_t index = 0U; index < 256U; ++index) {
+            // Bboxes spanning offscreen, single-tile, and multi-tile cases
+            // with min/max on both sides of tile boundaries.
+            const auto coord = [&next] {
+                return static_cast<std::int32_t>(next() % 200U) - 40;
+            };
+            const auto lo_x = coord();
+            const auto lo_y = coord();
+            triangles.push_back(
+                raster::ScreenTriangle{
+                    .min_x = lo_x,
+                    .min_y = lo_y,
+                    .max_x = lo_x + static_cast<std::int32_t>(next() % 60U),
+                    .max_y = lo_y + static_cast<std::int32_t>(next() % 40U),
+                }
+            );
+        }
+
+        raster::TileBins expected{};
+        raster::bin_triangles(triangles, width, height, expected);
+        for (const std::size_t workers : {1U, 2U, 3U, 5U, 8U}) {
+            raster::TileExecutor executor{workers};
+            raster::TileBins actual{};
+            raster::bin_triangles(triangles, width, height, actual, executor, workers);
+            REQUIRE(actual.tile_columns() == expected.tile_columns());
+            REQUIRE(actual.tile_rows() == expected.tile_rows());
+            for (std::size_t tile = 0U; tile < expected.tile_count(); ++tile) {
+                REQUIRE(
+                    std::ranges::equal(
+                        actual.triangle_indices(tile),
+                        expected.triangle_indices(tile)
+                    )
+                );
+            }
+            // Rebuild must reuse storage and stay identical.
+            const auto* const retained = actual.triangle_indices(0U).data();
+            raster::bin_triangles(triangles, width, height, actual, executor, workers);
+            REQUIRE(actual.triangle_indices(0U).data() == retained);
+            for (std::size_t tile = 0U; tile < expected.tile_count(); ++tile) {
+                REQUIRE(
+                    std::ranges::equal(
+                        actual.triangle_indices(tile),
+                        expected.triangle_indices(tile)
+                    )
+                );
+            }
+        }
+    }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
     TEST_CASE(
         "tile raster regions preserve global quad coverage and helper lanes", "[tile][rasterizer]"
     ) {
