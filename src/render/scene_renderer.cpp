@@ -233,12 +233,11 @@ namespace raster::render {
             // Keep diagnostics scoped to the visible camera pass; the shadow
             // pass uses a different projection and its own preparation path.
             if (shadows_enabled
-                && !detail::render_shadow_map(
+                && !detail::render_shadow_map_tiled(
                     tile_state->shadow_map,
                     light_shader,
                     mesh,
-                    tile_state->shadow_prepared,
-                    nullptr,
+                    *tile_state,
                     chunks,
                     chunk_lod_reference
                 )) {
