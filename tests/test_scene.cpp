@@ -899,6 +899,79 @@ namespace {
     }
 
     // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
+    TEST_CASE("diffuse interpolation skips world position", "[scene][shader]") {
+        // The diffuse fragment never reads world position, so FloorShader
+        // omits its lerp and substitutes zero; every other attribute must
+        // match the full perspective-correct interpolation exactly.
+        raster::render::detail::FloorShader<raster::LayoutTiled4x4> shader{};
+        shader.uniforms.shading = raster::render::SceneShading::Diffuse;
+        const raster::render::detail::FloorShader<raster::LayoutTiled4x4>::Varyings vertex_a{
+            .clip_pos = raster::Vec4f{.x = 0.0F, .y = 0.0F, .z = 0.5F, .w = 1.0F},
+            .uv = raster::Vec2f{.x = 0.0F, .y = 0.0F},
+            .normal = raster::Vec3f{.x = 0.0F, .y = 0.0F, .z = 1.0F},
+            .position = raster::Vec3f{.x = 1.0F, .y = 2.0F, .z = 3.0F},
+            .light_clip = raster::Vec4f{.x = 0.0F, .y = 0.0F, .z = 0.25F, .w = 1.0F},
+        };
+        const auto vertex_b = vertex_a;
+        const auto vertex_c = vertex_a;
+        constexpr raster::PixelBarycentrics bary{
+            .l0 = 0.25F,
+            .l1 = 0.25F,
+            .l2 = 0.5F,
+            .a0 = 0.2F,
+            .a1 = 0.3F,
+            .a2 = 0.5F,
+        };
+        // Independent perspective-correct reference, same operation order
+        // as the shader mixin.
+        const auto ref_uv =
+            raster::lerp3(vertex_a.uv, vertex_b.uv, vertex_c.uv, bary.a0, bary.a1, bary.a2);
+        const auto ref_normal = raster::lerp3(
+            vertex_a.normal,
+            vertex_b.normal,
+            vertex_c.normal,
+            bary.a0,
+            bary.a1,
+            bary.a2
+        );
+        const auto ref_position = raster::lerp3(
+            vertex_a.position,
+            vertex_b.position,
+            vertex_c.position,
+            bary.a0,
+            bary.a1,
+            bary.a2
+        );
+        const auto ref_light = raster::lerp3(
+            vertex_a.light_clip,
+            vertex_b.light_clip,
+            vertex_c.light_clip,
+            bary.a0,
+            bary.a1,
+            bary.a2
+        );
+        const auto fast = shader.interpolate(vertex_a, vertex_b, vertex_c, bary);
+        REQUIRE(std::get<0>(fast).x == ref_uv.x);
+        REQUIRE(std::get<0>(fast).y == ref_uv.y);
+        REQUIRE(std::get<1>(fast).x == ref_normal.x);
+        REQUIRE(std::get<1>(fast).y == ref_normal.y);
+        REQUIRE(std::get<1>(fast).z == ref_normal.z);
+        REQUIRE(std::get<2>(fast).x == 0.0F);
+        REQUIRE(std::get<2>(fast).y == 0.0F);
+        REQUIRE(std::get<2>(fast).z == 0.0F);
+        REQUIRE(std::get<3>(fast).x == ref_light.x);
+        REQUIRE(std::get<3>(fast).y == ref_light.y);
+        REQUIRE(std::get<3>(fast).z == ref_light.z);
+        REQUIRE(std::get<3>(fast).w == ref_light.w);
+
+        shader.uniforms.shading = raster::render::SceneShading::Pbr;
+        const auto pbr = shader.interpolate(vertex_a, vertex_b, vertex_c, bary);
+        REQUIRE(std::get<2>(pbr).x == ref_position.x);
+        REQUIRE(std::get<2>(pbr).y == ref_position.y);
+        REQUIRE(std::get<2>(pbr).z == ref_position.z);
+    }
+
+    // NOLINTNEXTLINE(clang-diagnostic-c2y-extensions): Catch2 uses __COUNTER__ for registration.
     TEST_CASE(
         "warmed renderer stays allocation-free after heap churn", "[scene][allocation][aging]"
     ) {

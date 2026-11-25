@@ -29,7 +29,7 @@ namespace raster::render::detail {
         const SoAMesh& mesh,
         std::size_t triangle_index,
         bool guard_band_test,
-        SceneRenderDiagnostics* diagnostics,
+        SceneRenderDiagnostics::Local& local,
         ClippedTriangleFan<typename Shader::Varyings>& fan_out
     ) noexcept {
         const auto index_base = triangle_index * 3U;
@@ -42,9 +42,8 @@ namespace raster::render::detail {
             shader.vertex(mesh.positions[vertex_b], mesh.uvs[vertex_b], mesh.normals[vertex_b]);
         const auto varying_c =
             shader.vertex(mesh.positions[vertex_c], mesh.uvs[vertex_c], mesh.normals[vertex_c]);
-        if (diagnostics != nullptr) {
-            diagnostics->source_triangles.fetch_add(1U, std::memory_order_relaxed);
-        }
+
+        ++local.source_triangles;
         if (!raster::detail::finite(varying_a.clip_pos)
             || !raster::detail::finite(varying_b.clip_pos)
             || !raster::detail::finite(varying_c.clip_pos)) {
@@ -54,10 +53,8 @@ namespace raster::render::detail {
             if (!clipped) {
                 return false;
             }
-            if (diagnostics != nullptr) {
-                diagnostics->clipped_triangles.fetch_add(1U, std::memory_order_relaxed);
-            }
 
+            ++local.clipped_triangles;
             fan_out = std::move(*clipped);
             return true;
         }
@@ -74,9 +71,7 @@ namespace raster::render::detail {
             combined
         );
         if (common != 0U) {
-            if (diagnostics != nullptr) {
-                diagnostics->frustum_rejected_triangles.fetch_add(1U, std::memory_order_relaxed);
-            }
+            ++local.frustum_rejected_triangles;
             return true;
         }
 
@@ -92,10 +87,8 @@ namespace raster::render::detail {
         if (!clipped) {
             return false;
         }
-        if (diagnostics != nullptr) {
-            diagnostics->clipped_triangles.fetch_add(1U, std::memory_order_relaxed);
-        }
 
+        ++local.clipped_triangles;
         fan_out = std::move(*clipped);
         return true;
     }
@@ -222,23 +215,14 @@ namespace raster::render::detail {
         std::span<const SceneChunk> chunks,
         const Vec3f& lod_reference
     ) noexcept {
+        SceneRenderDiagnostics::Local local{};
         const auto draw_triangle = [&](std::size_t triangle_index) noexcept -> bool {
             ClippedTriangleFan<typename FloorShader<Layout>::Varyings> fan{};
-            if (!clip_source_triangle(
-                    shader,
-                    mesh,
-                    triangle_index,
-                    guard_band_test,
-                    diagnostics,
-                    fan
-                )) {
+            if (!clip_source_triangle(shader, mesh, triangle_index, guard_band_test, local, fan)) {
                 return false;
             }
             for (const auto& triangle : fan.active_triangles()) {
-                if (diagnostics != nullptr) {
-                    diagnostics->prepared_triangles.fetch_add(1U, std::memory_order_relaxed);
-                }
-
+                ++local.prepared_triangles;
                 draw_mesh_triangle(
                     framebuffer,
                     shader,
@@ -246,12 +230,7 @@ namespace raster::render::detail {
                     triangle.vertices[1],
                     triangle.vertices[2]
                 );
-                if (diagnostics != nullptr) {
-                    diagnostics->rasterized_triangle_submissions.fetch_add(
-                        1U,
-                        std::memory_order_relaxed
-                    );
-                }
+                ++local.rasterized_triangle_submissions;
             }
             return true;
         };
@@ -259,25 +238,24 @@ namespace raster::render::detail {
             for (const auto triangle_index :
                  std::views::iota(std::size_t{0}, mesh.triangle_count())) {
                 if (!draw_triangle(triangle_index)) {
+                    local.merge_into(diagnostics);
                     return false;
                 }
             }
+
+            local.merge_into(diagnostics);
             return true;
         }
 
         const auto guard_band = guard_band_test ? 2.0F : 1.0F;
         for (const auto& chunk : chunks) {
-            if (diagnostics != nullptr) {
-                diagnostics->source_chunks.fetch_add(1U, std::memory_order_relaxed);
-            }
+            ++local.source_chunks;
             if (chunk_outside_clip_frustum(
                     shader.uniforms.model_view_projection,
                     chunk,
                     guard_band
                 )) {
-                if (diagnostics != nullptr) {
-                    diagnostics->frustum_rejected_chunks.fetch_add(1U, std::memory_order_relaxed);
-                }
+                ++local.frustum_rejected_chunks;
                 continue;
             }
 
@@ -287,10 +265,12 @@ namespace raster::render::detail {
                 std::min(chunk.first_triangle + chunk.triangle_count, mesh.triangle_count());
             for (const auto triangle_index : std::views::iota(chunk.first_triangle, end)) {
                 if (!draw_triangle(triangle_index)) {
+                    local.merge_into(diagnostics);
                     return false;
                 }
             }
         }
+        local.merge_into(diagnostics);
         return true;
     }
 
@@ -316,16 +296,10 @@ namespace raster::render::detail {
         const Vec3f& lod_reference
     ) noexcept {
         prepared.clear();
+        SceneRenderDiagnostics::Local local{};
         const auto prepare_triangle = [&](std::size_t triangle_index) noexcept -> bool {
             ClippedTriangleFan<typename Shader::Varyings> fan{};
-            if (!clip_source_triangle(
-                    shader,
-                    mesh,
-                    triangle_index,
-                    guard_band_test,
-                    diagnostics,
-                    fan
-                )) {
+            if (!clip_source_triangle(shader, mesh, triangle_index, guard_band_test, local, fan)) {
                 return false;
             }
             for (const auto& clipped_triangle : fan.active_triangles()) {
@@ -367,13 +341,8 @@ namespace raster::render::detail {
 
                 const auto setup = make_screen_triangle(screen, inverse_w, reverse_z);
                 if (setup) {
-                    if (diagnostics != nullptr) {
-                        diagnostics->prepared_triangles.fetch_add(1U, std::memory_order_relaxed);
-                        diagnostics->rasterized_triangle_submissions.fetch_add(
-                            1U,
-                            std::memory_order_relaxed
-                        );
-                    }
+                    ++local.prepared_triangles;
+                    ++local.rasterized_triangle_submissions;
                     prepared.push_back(
                         PreparedTriangle<Shader>{.setup = *setup, .vertices = vertices}
                     );
@@ -385,25 +354,24 @@ namespace raster::render::detail {
             for (const auto triangle_index :
                  std::views::iota(begin_work, std::min(end_work, mesh.triangle_count()))) {
                 if (!prepare_triangle(triangle_index)) {
+                    local.merge_into(diagnostics);
                     return false;
                 }
             }
+
+            local.merge_into(diagnostics);
             return true;
         }
         for (const auto chunk_index :
              std::views::iota(begin_chunk, std::min(end_chunk, chunks.size()))) {
             const auto& chunk = chunks[chunk_index];
-            if (diagnostics != nullptr) {
-                diagnostics->source_chunks.fetch_add(1U, std::memory_order_relaxed);
-            }
+            ++local.source_chunks;
             if (chunk_outside_clip_frustum(
                     shader.uniforms.model_view_projection,
                     chunk,
                     guard_band_test ? 2.0F : 1.0F
                 )) {
-                if (diagnostics != nullptr) {
-                    diagnostics->frustum_rejected_chunks.fetch_add(1U, std::memory_order_relaxed);
-                }
+                ++local.frustum_rejected_chunks;
                 continue;
             }
 
@@ -413,10 +381,13 @@ namespace raster::render::detail {
                 std::min(chunk.first_triangle + chunk.triangle_count, mesh.triangle_count());
             for (const auto triangle_index : std::views::iota(chunk.first_triangle, end)) {
                 if (!prepare_triangle(triangle_index)) {
+                    local.merge_into(diagnostics);
                     return false;
                 }
             }
         }
+
+        local.merge_into(diagnostics);
         return true;
     }
 

@@ -33,6 +33,45 @@ namespace raster::render {
             prepared_triangles.store(0U, std::memory_order_relaxed);
             rasterized_triangle_submissions.store(0U, std::memory_order_relaxed);
         }
+
+        // Plain per-call accumulator: one atomic RMW per triangle stalls
+        // every worker on the same cache lines (the tiled path hammers seven
+        // shared counters from every thread), so hot loops count locally and
+        // merge once per call.
+        struct Local {
+            std::size_t source_triangles{};
+            std::size_t frustum_rejected_triangles{};
+            std::size_t source_chunks{};
+            std::size_t frustum_rejected_chunks{};
+            std::size_t clipped_triangles{};
+            std::size_t prepared_triangles{};
+            std::size_t rasterized_triangle_submissions{};
+
+            void merge_into(SceneRenderDiagnostics* target) const noexcept {
+                if (target == nullptr) {
+                    return;
+                }
+
+                target->source_triangles.fetch_add(source_triangles, std::memory_order_relaxed);
+                target->frustum_rejected_triangles.fetch_add(
+                    frustum_rejected_triangles,
+                    std::memory_order_relaxed
+                );
+
+                target->source_chunks.fetch_add(source_chunks, std::memory_order_relaxed);
+                target->frustum_rejected_chunks.fetch_add(
+                    frustum_rejected_chunks,
+                    std::memory_order_relaxed
+                );
+
+                target->clipped_triangles.fetch_add(clipped_triangles, std::memory_order_relaxed);
+                target->prepared_triangles.fetch_add(prepared_triangles, std::memory_order_relaxed);
+                target->rasterized_triangle_submissions.fetch_add(
+                    rasterized_triangle_submissions,
+                    std::memory_order_relaxed
+                );
+            }
+        };
     };
 
     // Diffuse preserves the legacy byte-oriented path. Pbr requires an Srgb

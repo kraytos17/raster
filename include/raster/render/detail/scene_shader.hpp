@@ -73,6 +73,57 @@ namespace raster::render::detail {
             };
         }
 
+        // Fragment interpolation matching ShaderBase exactly, except that
+        // the diffuse path skips world position (no diffuse consumer reads
+        // it) and substitutes a zero placeholder to keep the tuple shape
+        // stable. The skipped lerp also frees registers across the texture
+        // and shadow calls in the per-quad fragment.
+        template <typename VaryingsT> [[nodiscard]]
+        constexpr auto interpolate(
+            const VaryingsT& varying_a,
+            const VaryingsT& varying_b,
+            const VaryingsT& varying_c,
+            const PixelBarycentrics& barycentrics
+        ) const noexcept {
+            if (uniforms.shading == SceneShading::Diffuse && !uniforms.solid_color_debug) {
+                const auto attributes_a = varying_a.attributes();
+                const auto attributes_b = varying_b.attributes();
+                const auto attributes_c = varying_c.attributes();
+                static_assert(
+                    std::tuple_size_v<decltype(attributes_a)> == 4,
+                    "FloorShader attributes are (uv, normal, position, light_clip)"
+                );
+                return std::tuple{
+                    raster::lerp3(
+                        std::get<0>(attributes_a),
+                        std::get<0>(attributes_b),
+                        std::get<0>(attributes_c),
+                        barycentrics.a0,
+                        barycentrics.a1,
+                        barycentrics.a2
+                    ),
+                    raster::lerp3(
+                        std::get<1>(attributes_a),
+                        std::get<1>(attributes_b),
+                        std::get<1>(attributes_c),
+                        barycentrics.a0,
+                        barycentrics.a1,
+                        barycentrics.a2
+                    ),
+                    Vec3f(),
+                    raster::lerp3(
+                        std::get<3>(attributes_a),
+                        std::get<3>(attributes_b),
+                        std::get<3>(attributes_c),
+                        barycentrics.a0,
+                        barycentrics.a1,
+                        barycentrics.a2
+                    ),
+                };
+            }
+            return ShaderBase::interpolate(varying_a, varying_b, varying_c, barycentrics);
+        }
+
         // Ambient + Lambertian diffuse from the uniforms sun. When the
         // shadow map says dark, only ambient survives.
         [[nodiscard]]
