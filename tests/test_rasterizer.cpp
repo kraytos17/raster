@@ -158,8 +158,13 @@ namespace {
         };
         constexpr std::size_t width = 130U;
         constexpr std::size_t height = 75U;
-        std::vector<raster::ScreenTriangle> triangles{};
-        triangles.reserve(256U);
+
+        struct TestBinTriangle {
+            raster::ScreenTriangle setup{};
+        };
+
+        std::vector<TestBinTriangle> flat{};
+        flat.reserve(256U);
         for (std::size_t index = 0U; index < 256U; ++index) {
             // Bboxes spanning offscreen, single-tile, and multi-tile cases
             // with min/max on both sides of tile boundaries.
@@ -168,43 +173,74 @@ namespace {
             };
             const auto lo_x = coord();
             const auto lo_y = coord();
-            triangles.push_back(
-                raster::ScreenTriangle{
-                    .min_x = lo_x,
-                    .min_y = lo_y,
-                    .max_x = lo_x + static_cast<std::int32_t>(next() % 60U),
-                    .max_y = lo_y + static_cast<std::int32_t>(next() % 40U),
+            flat.push_back(
+                TestBinTriangle{
+                    .setup = raster::ScreenTriangle{
+                        .min_x = lo_x,
+                        .min_y = lo_y,
+                        .max_x = lo_x + static_cast<std::int32_t>(next() % 60U),
+                        .max_y = lo_y + static_cast<std::int32_t>(next() % 40U),
+                    },
                 }
             );
         }
+        std::vector<raster::ScreenTriangle> setups{};
+        setups.reserve(flat.size());
+        for (const auto& triangle : flat) {
+            setups.push_back(triangle.setup);
+        }
 
         raster::TileBins expected{};
-        raster::bin_triangles(triangles, width, height, expected);
+        raster::bin_triangles(setups, width, height, expected);
         for (const std::size_t workers : {1U, 2U, 3U, 5U, 8U}) {
+            // Contiguous split mirroring the prepare partition: worker w owns
+            // a consecutive run, so packed (worker, local) order matches the
+            // flat input order exactly.
+            std::vector<std::vector<TestBinTriangle>> sharded(workers);
+            for (std::size_t index = 0U; index < flat.size(); ++index) {
+                sharded[(index * workers) / flat.size()].push_back(flat[index]);
+            }
+            // Prefix sums map flat global indices back to (worker, local).
+            std::vector<std::size_t> prefix(workers + 1U, 0U);
+            for (std::size_t worker = 0U; worker < workers; ++worker) {
+                prefix[worker + 1U] = prefix[worker] + sharded[worker].size();
+            }
+            const auto pack_flat = [&](std::size_t flat_index) {
+                std::size_t worker = 0U;
+                while (worker + 1U < workers && prefix[worker + 1U] <= flat_index) {
+                    ++worker;
+                }
+                return raster::detail::pack_triangle_index(worker, flat_index - prefix[worker]);
+            };
+
             raster::TileExecutor executor{workers};
             raster::TileBins actual{};
-            raster::bin_triangles(triangles, width, height, actual, executor, workers);
+            raster::bin_triangles(sharded, width, height, actual, executor);
             REQUIRE(actual.tile_columns() == expected.tile_columns());
             REQUIRE(actual.tile_rows() == expected.tile_rows());
             for (std::size_t tile = 0U; tile < expected.tile_count(); ++tile) {
-                REQUIRE(
-                    std::ranges::equal(
-                        actual.triangle_indices(tile),
-                        expected.triangle_indices(tile)
-                    )
-                );
+                std::vector<std::size_t> expected_packed{};
+                for (const auto flat_index : expected.triangle_indices(tile)) {
+                    expected_packed.push_back(pack_flat(flat_index));
+                }
+                REQUIRE(std::ranges::equal(actual.triangle_indices(tile), expected_packed));
+                for (const auto packed : actual.triangle_indices(tile)) {
+                    const auto worker = raster::detail::unpack_triangle_worker(packed);
+                    const auto local = raster::detail::unpack_triangle_local(packed);
+                    REQUIRE(worker < workers);
+                    REQUIRE(local < sharded[worker].size());
+                }
             }
             // Rebuild must reuse storage and stay identical.
             const auto* const retained = actual.triangle_indices(0U).data();
-            raster::bin_triangles(triangles, width, height, actual, executor, workers);
+            raster::bin_triangles(sharded, width, height, actual, executor);
             REQUIRE(actual.triangle_indices(0U).data() == retained);
             for (std::size_t tile = 0U; tile < expected.tile_count(); ++tile) {
-                REQUIRE(
-                    std::ranges::equal(
-                        actual.triangle_indices(tile),
-                        expected.triangle_indices(tile)
-                    )
-                );
+                std::vector<std::size_t> expected_packed{};
+                for (const auto flat_index : expected.triangle_indices(tile)) {
+                    expected_packed.push_back(pack_flat(flat_index));
+                }
+                REQUIRE(std::ranges::equal(actual.triangle_indices(tile), expected_packed));
             }
         }
     }

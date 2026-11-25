@@ -8,7 +8,6 @@
 #include <vector>
 
 #include "raster/pipeline/rasterizer.hpp"
-#include "raster/pipeline/tile_executor.hpp"
 
 namespace raster {
     inline constexpr std::size_t raster_tile_size = 16U;
@@ -76,13 +75,12 @@ namespace raster {
             std::span<const ScreenTriangle>, std::size_t, std::size_t, TileBins&
         );
 
-        template <typename Executor> friend void bin_triangles(
-            std::span<const ScreenTriangle>,
+        template <typename Executor, typename Prepared> friend void bin_triangles(
+            const std::vector<std::vector<Prepared>>&,
             std::size_t,
             std::size_t,
             TileBins&,
-            Executor&,
-            std::size_t
+            Executor&
         );
 
         std::size_t tile_columns_{};
@@ -95,18 +93,37 @@ namespace raster {
         std::vector<std::size_t> worker_cursors_{};
     };
 
-    // Parallel counting-sort binning with identical output to the serial
-    // entry: per-worker local counts keep every increment thread-local,
-    // the serial reduce preserves global input order, and per-worker write
-    // cursors partition each tile's segment deterministically
-    template <typename Executor> void bin_triangles(
-        std::span<const ScreenTriangle> triangles,
+    // Parallel counting-sort binning over per-worker triangle vectors with
+    // identical per-tile order to the serial entry: worker w holds a
+    // contiguous slice of global input order, so concatenating the slices
+    // reproduces it exactly. Stored indices pack the source location as
+    // (worker << 32) | local; the rasterizer unpacks them to fetch directly
+    // from the worker vectors, which removes the merged-array copies.
+    namespace detail {
+        [[nodiscard]]
+        inline std::size_t pack_triangle_index(std::size_t worker, std::size_t local) noexcept {
+            return (worker << 32U) | local;
+        }
+
+        [[nodiscard]]
+        inline std::size_t unpack_triangle_worker(std::size_t packed) noexcept {
+            return packed >> 32U;
+        }
+
+        [[nodiscard]]
+        inline std::size_t unpack_triangle_local(std::size_t packed) noexcept {
+            return packed & 0xFFFFFFFFU;
+        }
+    } // namespace detail
+
+    template <typename Executor, typename Prepared> void bin_triangles(
+        const std::vector<std::vector<Prepared>>& worker_triangles,
         std::size_t viewport_width,
         std::size_t viewport_height,
         TileBins& bins,
-        Executor& executor,
-        std::size_t worker_count
+        Executor& executor
     ) {
+        const auto worker_count = worker_triangles.size();
         const auto grid = [&] noexcept {
             const auto columns = viewport_width
                 / raster_tile_size
@@ -128,9 +145,6 @@ namespace raster {
             bins.tile_rows_ = tile_rows;
             return;
         }
-        if (worker_count == 0U) {
-            worker_count = 1U;
-        }
 
         bins.tile_columns_ = tile_columns;
         bins.tile_rows_ = tile_rows;
@@ -149,14 +163,17 @@ namespace raster {
             for (std::size_t slot = 0U; slot < cursor_stride; ++slot) {
                 local[slot] = 0U;
             }
-
-            const auto [begin, end] = partition_range(triangles.size(), worker_count, worker);
-            for (std::size_t index = begin; index < end; ++index) {
-                const auto& triangle = triangles[index];
-                const auto [first_column, column_end] =
-                    detail::clamped_tile_range(triangle.min_x, triangle.max_x, viewport_width);
-                const auto [first_row, row_end] =
-                    detail::clamped_tile_range(triangle.min_y, triangle.max_y, viewport_height);
+            for (const auto& triangle : worker_triangles[worker]) {
+                const auto [first_column, column_end] = detail::clamped_tile_range(
+                    triangle.setup.min_x,
+                    triangle.setup.max_x,
+                    viewport_width
+                );
+                const auto [first_row, row_end] = detail::clamped_tile_range(
+                    triangle.setup.min_y,
+                    triangle.setup.max_y,
+                    viewport_height
+                );
                 for (std::size_t row = first_row; row < row_end; ++row) {
                     for (std::size_t column = first_column; column < column_end; ++column) {
                         ++local[row * tile_columns + column + 1U];
@@ -179,17 +196,23 @@ namespace raster {
         bins.triangle_indices_.resize(bins.offsets_.back());
         executor.execute(worker_count, [&](std::size_t worker) noexcept {
             auto* const local = bins.worker_cursors_.data() + worker * cursor_stride;
-            const auto [begin, end] = partition_range(triangles.size(), worker_count, worker);
-            for (std::size_t index = begin; index < end; ++index) {
-                const auto& triangle = triangles[index];
-                const auto [first_column, column_end] =
-                    detail::clamped_tile_range(triangle.min_x, triangle.max_x, viewport_width);
-                const auto [first_row, row_end] =
-                    detail::clamped_tile_range(triangle.min_y, triangle.max_y, viewport_height);
+            const auto& chunk = worker_triangles[worker];
+            for (std::size_t index = 0U; index < chunk.size(); ++index) {
+                const auto [first_column, column_end] = detail::clamped_tile_range(
+                    chunk[index].setup.min_x,
+                    chunk[index].setup.max_x,
+                    viewport_width
+                );
+                const auto [first_row, row_end] = detail::clamped_tile_range(
+                    chunk[index].setup.min_y,
+                    chunk[index].setup.max_y,
+                    viewport_height
+                );
                 for (std::size_t row = first_row; row < row_end; ++row) {
                     for (std::size_t column = first_column; column < column_end; ++column) {
                         const auto tile = row * tile_columns + column;
-                        bins.triangle_indices_[local[tile]++] = index;
+                        bins.triangle_indices_[local[tile]++] =
+                            detail::pack_triangle_index(worker, index);
                     }
                 }
             }
